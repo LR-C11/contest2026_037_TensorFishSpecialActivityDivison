@@ -4,10 +4,14 @@
   "github_login": "LR-C11",
   "generator": "claude-code-collector@1.2.0",
 <<<<<<< HEAD
+<<<<<<< HEAD
   "updated_at": "2026-09-09T14:35:12.608Z",
 =======
   "updated_at": "2026-07-24T08:50:41.392Z",
 >>>>>>> d35023e (logs: upload submission logs for LR-C11)
+=======
+  "updated_at": "2026-07-24T17:29:53.968Z",
+>>>>>>> bb6d276 (logs: add MiMo Desktop session exports and log adapter script)
   "sessions": [
     {
       "session_id": "b49754f5-30f9-443f-8c42-65d0c7832797",
