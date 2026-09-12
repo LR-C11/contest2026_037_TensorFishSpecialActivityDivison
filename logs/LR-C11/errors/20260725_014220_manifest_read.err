@@ -1,0 +1,12 @@
+{
+  "ts": "2026-07-24T17:42:20.784Z",
+  "kind": "manifest_read",
+  "tool": "claude-code",
+  "team_id": "contest2026_037_TensorFishSpecialActivityDivison",
+  "version": "1.2.0",
+  "context": {
+    "tool": "claude-code",
+    "path": "C:\\Users\\Administrator\\Desktop\\openvelageminis1\\contest2026_037_TensorFishSpecialActivityDivison\\logs\\LR-C11\\manifest.json"
+  },
+  "message": "Expecting property name enclosed in double quotes: line 6 column 1 (char 168)"
+}
