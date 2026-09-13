@@ -63,12 +63,15 @@ lv_obj_t *dm_btn(lv_obj_t *p, const char *zh, const char *en, int w, int h,
                  uint32_t bg, uint32_t fg, lv_event_cb_t cb, void *ud)
 {
   lv_obj_t *b = lv_button_create(p);
-  lv_obj_remove_style_all(b);
   lv_obj_set_size(b, w, h);
   lv_obj_set_style_radius(b, h / 2, LV_PART_MAIN);
   lv_obj_set_style_bg_color(b, lv_color_hex(bg), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(b, 0, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(b, 0, LV_PART_MAIN);
   lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
   if (cb)
     {
       lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
@@ -76,6 +79,7 @@ lv_obj_t *dm_btn(lv_obj_t *p, const char *zh, const char *en, int w, int h,
 
   lv_obj_t *t = dm_lbl(b, zh, en, g_dm_font_s, fg);
   lv_obj_center(t);
+  lv_obj_clear_flag(t, LV_OBJ_FLAG_CLICKABLE);
   return b;
 }
 
