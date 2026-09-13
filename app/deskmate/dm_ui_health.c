@@ -476,20 +476,64 @@ static void paint_sheet_picks(void)
 
 static void open_sheet(lv_event_t *e)
 {
+  int i;
   (void)e;
   s_pick_mask = 0;
   s_pick_quick = 0;
   s_pick_type = 0;
   paint_sheet_picks();
+
+  /* dim only — do not steal clicks */
   if (s_overlay)
     {
+      lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_CLICKABLE);
       lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+  if (s_sheet)
+    {
+      lv_obj_clear_flag(s_sheet, LV_OBJ_FLAG_HIDDEN);
+    }
+
+  /* force top-most */
+  if (s_overlay)
+    {
+      lv_obj_move_foreground(s_overlay);
+    }
+  if (s_sheet)
+    {
+      lv_obj_move_foreground(s_sheet);
+    }
+  for (i = 0; i < 16; i++)
+    {
+      if (s_mood_btns[i])
+        {
+          lv_obj_move_foreground(s_mood_btns[i]);
+        }
+    }
+  for (i = 0; i < DM_QUICK_MAX; i++)
+    {
+      if (s_quick_btns[i])
+        {
+          lv_obj_move_foreground(s_quick_btns[i]);
+        }
+    }
+  if (s_seg_cur)
+    {
+      lv_obj_move_foreground(s_seg_cur);
+    }
+  if (s_seg_day)
+    {
+      lv_obj_move_foreground(s_seg_day);
     }
 }
 
 static void close_sheet(lv_event_t *e)
 {
   (void)e;
+  if (s_sheet)
+    {
+      lv_obj_add_flag(s_sheet, LV_OBJ_FLAG_HIDDEN);
+    }
   if (s_overlay)
     {
       lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
@@ -678,7 +722,7 @@ void dm_create_health(void)
                  open_sheet, NULL);
   lv_obj_align(s_fab, LV_ALIGN_TOP_MID, 0, 160);
 
-  /* overlay + bottom sheet (scrollable body) */
+  /* Dim only (NOT clickable — must not steal touches from sheet buttons) */
   s_overlay = lv_obj_create(s_page);
   lv_obj_remove_style_all(s_overlay);
   lv_obj_set_size(s_overlay, DM_SCR_W, DM_SCR_H);
@@ -686,132 +730,76 @@ void dm_create_health(void)
   lv_obj_set_style_bg_color(s_overlay, lv_color_hex(0x000000), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_overlay, LV_OPA_70, LV_PART_MAIN);
   lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_CLICKABLE);
 
-  s_sheet = lv_obj_create(s_overlay);
-  lv_obj_remove_style_all(s_sheet);
+  /* Sheet is a sibling of overlay; all controls are DIRECT children */
+  s_sheet = lv_obj_create(s_page);
   lv_obj_set_size(s_sheet, DM_SCR_W, 220);
   lv_obj_set_pos(s_sheet, 0, 20);
-  lv_obj_set_style_bg_color(s_sheet, lv_color_hex(0x121212), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(s_sheet, lv_color_hex(0x141414), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_sheet, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_radius(s_sheet, 14, LV_PART_MAIN);
+  lv_obj_set_style_radius(s_sheet, 12, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_sheet, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(s_sheet, 0, LV_PART_MAIN);
   lv_obj_clear_flag(s_sheet, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(s_sheet, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(s_sheet, LV_OBJ_FLAG_HIDDEN);
 
   {
     lv_obj_t *ht = dm_lbl(s_sheet, "记录心情", "Log mood", g_dm_font_m,
                           C_INK);
-    lv_obj_set_pos(ht, 12, 8);
+    lv_obj_set_pos(ht, 12, 6);
 
-    lv_obj_t *hint = dm_lbl(s_sheet, "上下滑动选择", "Scroll to pick",
-                            g_dm_font_s, C_MUTED);
-    lv_obj_set_pos(hint, 200, 12);
+    s_seg_cur = sheet_btn(s_sheet, "当前", "Now", 90, 24, seg_cb,
+                          (void *)(uintptr_t)0);
+    lv_obj_set_pos(s_seg_cur, 12, 30);
+    s_seg_day = sheet_btn(s_sheet, "今日整体", "Daily", 100, 24, seg_cb,
+                          (void *)(uintptr_t)1);
+    lv_obj_set_pos(s_seg_day, 110, 30);
 
-    lv_obj_t *body = lv_obj_create(s_sheet);
-    lv_obj_remove_style_all(body);
-    lv_obj_set_size(body, DM_SCR_W, 150);
-    lv_obj_set_pos(body, 0, 32);
-    lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(body, 10, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(body, 6, LV_PART_MAIN);
-    lv_obj_set_scroll_dir(body, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_START);
+    /* 16 moods: 4 cols x 4 rows, direct on sheet */
+    x = 12;
+    y = 60;
+    for (i = 0; i < 16; i++)
+      {
+        int w = 72;
+        s_mood_btns[i] = sheet_btn(s_sheet, s_moods[i].zh, s_moods[i].en, w,
+                                   24, mood_btn_cb, (void *)(uintptr_t)i);
+        lv_obj_set_pos(s_mood_btns[i], x, y);
+        x += w + 4;
+        if (x > 240)
+          {
+            x = 12;
+            y += 28;
+          }
+      }
 
-    {
-      lv_obj_t *seg = lv_obj_create(body);
-      lv_obj_remove_style_all(seg);
-      lv_obj_set_size(seg, 296, 28);
-      lv_obj_set_style_bg_opa(seg, LV_OPA_TRANSP, LV_PART_MAIN);
-      lv_obj_clear_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
-      s_seg_cur = sheet_btn(seg, "当前", "Now", 90, 26, seg_cb,
-                            (void *)(uintptr_t)0);
-      lv_obj_set_pos(s_seg_cur, 0, 0);
-      s_seg_day = sheet_btn(seg, "今日整体", "Daily", 110, 26, seg_cb,
-                            (void *)(uintptr_t)1);
-      lv_obj_set_pos(s_seg_day, 98, 0);
-    }
-
-    {
-      lv_obj_t *lab = dm_lbl(body, "心情（可多选）", "Moods (multi)",
-                             g_dm_font_s, C_MUTED);
-      lv_obj_set_size(lab, 296, 14);
-    }
-
-    {
-      lv_obj_t *grid = lv_obj_create(body);
-      lv_obj_remove_style_all(grid);
-      lv_obj_set_size(grid, 296, 120);
-      lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, LV_PART_MAIN);
-      lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
-
-      x = 0;
-      y = 0;
-      for (i = 0; i < 16; i++)
-        {
-          int w = 48;
-          s_mood_btns[i] = sheet_btn(grid, s_moods[i].zh, s_moods[i].en, w,
-                                     24, mood_btn_cb, (void *)(uintptr_t)i);
-          lv_obj_set_pos(s_mood_btns[i], x, y);
-          x += w + 4;
-          if (x > 250)
-            {
-              x = 0;
-              y += 28;
-            }
-        }
-    }
+    /* quick phrases: 4 x 2 */
+    y += 4;
+    x = 12;
+    for (i = 0; i < DM_QUICK_MAX; i++)
+      {
+        int w = 72;
+        s_quick_btns[i] = sheet_btn(s_sheet, s_quick_zh[i], s_quick_en[i], w,
+                                    22, quick_btn_cb, (void *)(uintptr_t)i);
+        lv_obj_set_pos(s_quick_btns[i], x, y);
+        x += w + 4;
+        if (x > 240)
+          {
+            x = 12;
+            y += 26;
+          }
+      }
 
     {
-      lv_obj_t *lab = dm_lbl(body, "快捷描述", "Quick note", g_dm_font_s,
-                             C_MUTED);
-      lv_obj_set_size(lab, 296, 14);
+      lv_obj_t *cancel = dm_btn(s_sheet, "取消", "Cancel", 110, 28, C_BTN,
+                                C_MUTED, close_sheet, NULL);
+      lv_obj_t *save = dm_btn(s_sheet, "保存", "Save", 110, 28, C_FACE,
+                              C_EYE, save_cb, NULL);
+      lv_obj_set_pos(cancel, 36, 186);
+      lv_obj_set_pos(save, 166, 186);
     }
-
-    {
-      lv_obj_t *qgrid = lv_obj_create(body);
-      lv_obj_remove_style_all(qgrid);
-      lv_obj_set_size(qgrid, 296, 80);
-      lv_obj_set_style_bg_opa(qgrid, LV_OPA_TRANSP, LV_PART_MAIN);
-      lv_obj_clear_flag(qgrid, LV_OBJ_FLAG_SCROLLABLE);
-
-      x = 0;
-      y = 0;
-      for (i = 0; i < DM_QUICK_MAX; i++)
-        {
-          int w = 72;
-          s_quick_btns[i] = sheet_btn(qgrid, s_quick_zh[i], s_quick_en[i],
-                                      w, 24, quick_btn_cb,
-                                      (void *)(uintptr_t)i);
-          lv_obj_set_pos(s_quick_btns[i], x, y);
-          x += w + 4;
-          if (x > 220)
-            {
-              x = 0;
-              y += 28;
-            }
-        }
-    }
-  }
-
-  {
-    lv_obj_t *foot = lv_obj_create(s_sheet);
-    lv_obj_remove_style_all(foot);
-    lv_obj_set_size(foot, DM_SCR_W, 36);
-    lv_obj_set_pos(foot, 0, 184);
-    lv_obj_set_style_bg_color(foot, lv_color_hex(0x0a0a0a), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(foot, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_clear_flag(foot, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *cancel = dm_btn(foot, "取消", "Cancel", 110, 28, C_BTN,
-                              C_MUTED, close_sheet, NULL);
-    lv_obj_t *save = dm_btn(foot, "保存", "Save", 110, 28, C_FACE, C_EYE,
-                            save_cb, NULL);
-    lv_obj_set_pos(cancel, 36, 4);
-    lv_obj_set_pos(save, 166, 4);
   }
 
   if (s_rec_n == 0)
