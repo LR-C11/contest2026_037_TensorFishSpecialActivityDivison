@@ -1,0 +1,32 @@
+############################################################################
+# vendor/allwinnertech/apps/deskmate/Kconfig
+############################################################################
+
+config DESKMATE_APP
+	bool "Deskmate desk companion"
+	default n
+	depends on GRAPHICS_LVGL
+	---help---
+		Local-first LVGL desk companion for Gemini-S1 2.8" SPI LCD.
+		Home is a focus-duration page; start fades into a countdown
+		page with a blinking face, star/heart eyes, tap dialogue,
+		and a rolling MM:SS timer. Chat/health/supervise/notes are
+		navigable skeletons.
+
+if DESKMATE_APP
+
+config DESKMATE_APP_PROGNAME
+	string "Program name"
+	default "deskmate"
+
+config DESKMATE_APP_PRIORITY
+	int "Deskmate task priority"
+	default 100
+
+config DESKMATE_APP_STACKSIZE
+	int "Deskmate stack size"
+	default 65536
+	---help---
+		Keep 64KB so FreeType + LVGL draw buffers have headroom.
+
+endif

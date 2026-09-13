@@ -1,0 +1,7 @@
+############################################################################
+# vendor/allwinnertech/apps/deskmate/Make.defs
+############################################################################
+
+ifneq ($(CONFIG_DESKMATE_APP),)
+CONFIGURED_APPS += $(APPDIR)/vendor/allwinnertech/apps/deskmate
+endif
