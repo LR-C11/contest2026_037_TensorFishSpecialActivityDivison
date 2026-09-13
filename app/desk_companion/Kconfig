@@ -1,0 +1,50 @@
+#
+# Copyright (C) 2026 Xiaomi Corporation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+config DESK_COMPANION_APP
+	bool "Gemini-S1 Desk Companion (contest 037)"
+	default n
+	depends on GRAPHICS_LVGL && LV_USE_FREETYPE
+	help
+		Local-first LVGL desktop companion for the Gemini-S1 2.8" ILI9341
+		display. Provides focus timer, privacy toggle, temp/humidity via
+		uORB, optional Wi-Fi/BT cards. Chinese UI uses /data/font MiSans
+		when present; falls back to English Montserrat otherwise.
+
+if DESK_COMPANION_APP
+
+config DESK_COMPANION_APP_PROGNAME
+	string "Program name"
+	default "desk_companion"
+
+config DESK_COMPANION_APP_PRIORITY
+	int "Desk Companion task priority"
+	default 100
+
+config DESK_COMPANION_APP_STACKSIZE
+	int "Desk Companion stack size"
+	default 65536
+	---help---
+		LVGL NuttX backend checks that the app stack is at least 32KB.
+		Use 64KB so FreeType + draw buffers have headroom.
+
+config DESK_COMPANION_APP_FOCUS_SECONDS
+	int "Default focus session length (seconds)"
+	default 1500
+	---help---
+		25 * 60 = 1500 seconds by default.
+
+endif
