@@ -1,0 +1,7 @@
+############################################################################
+# vendor/allwinnertech/apps/desk_companion/Make.defs
+############################################################################
+
+ifneq ($(CONFIG_DESK_COMPANION_APP),)
+CONFIGURED_APPS += $(APPDIR)/vendor/allwinnertech/apps/desk_companion
+endif
