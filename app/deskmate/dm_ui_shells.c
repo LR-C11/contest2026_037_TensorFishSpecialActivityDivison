@@ -86,7 +86,16 @@ static void dock_cb(lv_event_t *e)
 void dm_dock_highlight(dm_page_t p)
 {
   int i;
-  dm_page_t focus_key = (p == PAGE_FOCUS_RUN) ? PAGE_FOCUS_HOME : p;
+  dm_page_t focus_key = p;
+
+  if (p == PAGE_FOCUS_RUN)
+    {
+      focus_key = PAGE_FOCUS_HOME;
+    }
+  else if (p == PAGE_MOOD_LOG)
+    {
+      focus_key = PAGE_HEALTH;
+    }
 
   for (i = 0; i < 5; i++)
     {

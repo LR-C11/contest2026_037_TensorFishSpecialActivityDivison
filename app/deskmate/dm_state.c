@@ -197,7 +197,7 @@ void dm_show(dm_page_t p)
 
   if (g_dm_dock)
     {
-      if (p == PAGE_FOCUS_RUN)
+      if (p == PAGE_FOCUS_RUN || p == PAGE_MOOD_LOG)
         {
           lv_obj_add_flag(g_dm_dock, LV_OBJ_FLAG_HIDDEN);
         }

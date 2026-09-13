@@ -12,7 +12,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.2.3"
+#define DM_VER "0.3.0"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -39,6 +39,7 @@ typedef enum {
   PAGE_FOCUS_RUN,
   PAGE_CHAT,
   PAGE_HEALTH,
+  PAGE_MOOD_LOG,
   PAGE_SUPERVISE,
   PAGE_NOTE,
   PAGE_COUNT

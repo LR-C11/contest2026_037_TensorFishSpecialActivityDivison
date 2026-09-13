@@ -40,23 +40,19 @@ static void mark_preset(int idx)
   int i;
   for (i = 0; i < 5; i++)
     {
+      lv_obj_t *lab;
       if (!s_preset_btns[i])
         {
           continue;
         }
-      if (i == idx)
+      lv_obj_set_style_bg_color(
+          s_preset_btns[i],
+          lv_color_hex(i == idx ? C_FACE : C_BTN), LV_PART_MAIN);
+      lab = lv_obj_get_child(s_preset_btns[i], 0);
+      if (lab)
         {
-          lv_obj_set_style_bg_color(s_preset_btns[i], lv_color_hex(C_FACE),
-                                    LV_PART_MAIN);
-          lv_obj_set_style_text_color(lv_obj_get_child(s_preset_btns[i], 0),
-                                      lv_color_hex(C_EYE), LV_PART_MAIN);
-        }
-      else
-        {
-          lv_obj_set_style_bg_color(s_preset_btns[i], lv_color_hex(C_BTN),
-                                    LV_PART_MAIN);
-          lv_obj_set_style_text_color(lv_obj_get_child(s_preset_btns[i], 0),
-                                      lv_color_hex(C_MUTED), LV_PART_MAIN);
+          lv_obj_set_style_text_color(
+              lab, lv_color_hex(i == idx ? C_EYE : C_MUTED), LV_PART_MAIN);
         }
     }
 }
