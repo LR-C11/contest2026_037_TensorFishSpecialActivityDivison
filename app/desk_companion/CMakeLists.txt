@@ -1,0 +1,24 @@
+# Contest 2026 team 037 - DeskMate multi-page
+if(CONFIG_DESK_COMPANION_APP)
+  nuttx_add_application(
+    NAME
+    desk_companion
+    STACKSIZE
+    ${CONFIG_DESK_COMPANION_APP_STACKSIZE}
+    MODULE
+    ${CONFIG_DESK_COMPANION_APP}
+    SRCS
+    desk_companion_main.c
+    desk_state.c
+    desk_face.c
+    desk_ui_home.c
+    desk_ui_wifi.c
+    desk_ui_bt.c
+    desk_ui_note_about.c
+    desk_ui_focus.c
+    INCLUDE_DIRECTORIES
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${NUTTX_APPS_DIR}/frameworks/connectivity/bluetooth/framework/include
+      ${NUTTX_APPS_DIR}/system/uorb
+  )
+endif()
