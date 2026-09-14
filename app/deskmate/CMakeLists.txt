@@ -13,5 +13,7 @@ if(CONFIG_DESKMATE_APP)
       dm_ui_focus.c
       dm_ui_shells.c
       dm_ui_health.c
+      dm_ui_wifi.c
+      dm_wifi.c
     INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR})
 endif()

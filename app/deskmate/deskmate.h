@@ -12,7 +12,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.3.0"
+#define DM_VER "0.4.9"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -40,8 +40,14 @@ typedef enum {
   PAGE_CHAT,
   PAGE_HEALTH,
   PAGE_MOOD_LOG,
+  PAGE_FEATURES,
   PAGE_SUPERVISE,
   PAGE_NOTE,
+  PAGE_SETTINGS,
+  PAGE_WIFI,
+  PAGE_WIFI_PW,
+  PAGE_WIFI_CONN,
+  PAGE_WIFI_DONE,
   PAGE_COUNT
 } dm_page_t;
 
@@ -185,6 +191,28 @@ void dm_update_run_clock(void);
 void dm_health_add_focus_min(int32_t min);
 void dm_health_refresh(void);
 int dm_health_score(void);
+
+/* settings / wifi */
+void dm_create_settings(void);
+void dm_create_features(void);
+void dm_create_wifi(void);
+void dm_wifi_tick(void);
+int dm_wifi_start_scan(void);
+int dm_wifi_connect(const char *ssid, const char *pass);
+const char *dm_wifi_cur_ssid(void);
+const char *dm_wifi_cur_ip(void);
+int dm_wifi_connected(void);
+int dm_wifi_ap_count(void);
+int dm_wifi_ap_get(int i, const char **ssid, int *rssi, bool *open);
+int dm_wifi_sel(void);
+void dm_wifi_set_sel(int i);
+int dm_wifi_scan_busy(void);
+int dm_wifi_scan_ready(void);
+void dm_wifi_clear_scan_ready(void);
+int dm_wifi_conn_busy(void);
+int dm_wifi_conn_ok(void);
+int dm_wifi_conn_fail(void);
+void dm_wifi_clear_conn_flags(void);
 
 /* roll */
 void dm_clock_create(dm_clock_t *c, lv_obj_t *parent, int x, int y, int w,

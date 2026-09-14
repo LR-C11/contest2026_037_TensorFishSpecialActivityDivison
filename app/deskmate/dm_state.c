@@ -197,7 +197,9 @@ void dm_show(dm_page_t p)
 
   if (g_dm_dock)
     {
-      if (p == PAGE_FOCUS_RUN || p == PAGE_MOOD_LOG)
+      if (p == PAGE_FOCUS_RUN || p == PAGE_MOOD_LOG || p == PAGE_SUPERVISE ||
+          p == PAGE_NOTE || p == PAGE_WIFI_PW || p == PAGE_WIFI_CONN ||
+          p == PAGE_WIFI_DONE)
         {
           lv_obj_add_flag(g_dm_dock, LV_OBJ_FLAG_HIDDEN);
         }
@@ -235,6 +237,7 @@ void dm_tick(void)
 {
   dm_face_tick();
   dm_focus_run_tick();
+  dm_wifi_tick();
 }
 
 #endif /* CONFIG_DESKMATE_APP */
