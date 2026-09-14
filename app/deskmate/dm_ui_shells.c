@@ -178,15 +178,23 @@ void dm_create_features(void)
   lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -4, 0);
 
   c3 = lv_obj_create(sc);
-  lv_obj_set_size(c3, 292, 48);
-  lv_obj_set_style_bg_color(c3, lv_color_hex(0x0a0a0a), LV_PART_MAIN);
+  lv_obj_set_size(c3, 292, 56);
+  lv_obj_set_style_bg_color(c3, lv_color_hex(0x111111), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(c3, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_radius(c3, 12, LV_PART_MAIN);
   lv_obj_set_style_border_width(c3, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(c3, 10, LV_PART_MAIN);
   lv_obj_clear_flag(c3, LV_OBJ_FLAG_SCROLLABLE);
-  name = dm_lbl(c3, "更多能力后续扩展", "More later", g_dm_font_s, C_MUTED);
-  lv_obj_set_pos(name, 0, 12);
+  lv_obj_add_flag(c3, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(c3, fn_row_cb, LV_EVENT_CLICKED,
+                      (void *)(uintptr_t)PAGE_WORD_HOME);
+  name = dm_lbl(c3, "背单词", "Word Memo", g_dm_font_s, C_INK);
+  lv_obj_set_pos(name, 0, 2);
+  sub = dm_lbl(c3, "学习 / 复习 / 测验 / 错题", "Study / quiz / wrong",
+               g_dm_font_s, C_MUTED);
+  lv_obj_set_pos(sub, 0, 22);
+  arrow = dm_lbl(c3, "›", "›", g_dm_font_m, C_MUTED);
+  lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -4, 0);
 }
 
 static void dock_cb(lv_event_t *e)
@@ -208,7 +216,10 @@ void dm_dock_highlight(dm_page_t p)
     {
       focus_key = PAGE_HEALTH;
     }
-  else if (p == PAGE_SUPERVISE || p == PAGE_NOTE)
+  else if (p == PAGE_SUPERVISE || p == PAGE_NOTE ||
+           p == PAGE_WORD_HOME || p == PAGE_WORD_STUDY || p == PAGE_WORD_RES ||
+           p == PAGE_WORD_QMODE || p == PAGE_WORD_QUIZ || p == PAGE_WORD_WRONG ||
+           p == PAGE_WORD_LIST || p == PAGE_WORD_WSET)
     {
       focus_key = PAGE_FEATURES;
     }

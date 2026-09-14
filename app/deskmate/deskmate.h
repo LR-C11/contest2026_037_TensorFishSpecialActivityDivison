@@ -12,7 +12,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.4.9"
+#define DM_VER "0.5.1"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -48,6 +48,14 @@ typedef enum {
   PAGE_WIFI_PW,
   PAGE_WIFI_CONN,
   PAGE_WIFI_DONE,
+  PAGE_WORD_HOME,
+  PAGE_WORD_STUDY,
+  PAGE_WORD_RES,
+  PAGE_WORD_QMODE,
+  PAGE_WORD_QUIZ,
+  PAGE_WORD_WRONG,
+  PAGE_WORD_LIST,
+  PAGE_WORD_WSET,
   PAGE_COUNT
 } dm_page_t;
 
@@ -196,6 +204,7 @@ int dm_health_score(void);
 void dm_create_settings(void);
 void dm_create_features(void);
 void dm_create_wifi(void);
+void dm_create_word(void);
 void dm_wifi_tick(void);
 int dm_wifi_start_scan(void);
 int dm_wifi_connect(const char *ssid, const char *pass);

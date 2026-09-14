@@ -77,6 +77,7 @@ int deskmate_main(int argc, FAR char *argv[])
   dm_create_supervise();
   dm_create_note();
   dm_create_features();
+  dm_create_word();
   dm_create_settings();
   dm_create_wifi();
   dm_create_dock();

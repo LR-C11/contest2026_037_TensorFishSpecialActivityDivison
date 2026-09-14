@@ -199,7 +199,9 @@ void dm_show(dm_page_t p)
     {
       if (p == PAGE_FOCUS_RUN || p == PAGE_MOOD_LOG || p == PAGE_SUPERVISE ||
           p == PAGE_NOTE || p == PAGE_WIFI_PW || p == PAGE_WIFI_CONN ||
-          p == PAGE_WIFI_DONE)
+          p == PAGE_WIFI_DONE || p == PAGE_WORD_STUDY || p == PAGE_WORD_RES ||
+          p == PAGE_WORD_QUIZ || p == PAGE_WORD_WRONG ||
+          p == PAGE_WORD_LIST || p == PAGE_WORD_WSET)
         {
           lv_obj_add_flag(g_dm_dock, LV_OBJ_FLAG_HIDDEN);
         }
