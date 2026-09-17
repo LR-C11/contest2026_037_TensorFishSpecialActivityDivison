@@ -12,7 +12,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.2.1"
+#define DM_VER "0.6.5"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -39,8 +39,33 @@ typedef enum {
   PAGE_FOCUS_RUN,
   PAGE_CHAT,
   PAGE_HEALTH,
+  PAGE_MOOD_LOG,
+  PAGE_FEATURES,
   PAGE_SUPERVISE,
   PAGE_NOTE,
+  PAGE_SETTINGS,
+  PAGE_WIFI,
+  PAGE_WIFI_PW,
+  PAGE_WIFI_CONN,
+  PAGE_WIFI_DONE,
+  PAGE_WORD_HOME,
+  PAGE_WORD_STUDY,
+  PAGE_WORD_RES,
+  PAGE_WORD_QMODE,
+  PAGE_WORD_QUIZ,
+  PAGE_WORD_WRONG,
+  PAGE_WORD_LIST,
+  PAGE_WORD_WSET,
+  PAGE_CALC,
+  PAGE_SENSORS,
+  PAGE_GUESS,
+  PAGE_CONVERT,
+  PAGE_WATER,
+  PAGE_COUNTDOWN,
+  PAGE_EAT,
+  PAGE_24,
+  PAGE_DRAW,
+  PAGE_BMI,
   PAGE_COUNT
 } dm_page_t;
 
@@ -163,6 +188,8 @@ void dm_face_attach(lv_obj_t *page, int x, int y);
 void dm_face_set(dm_face_t f, dm_eye_decor_t decor, int decor_hold);
 void dm_face_tick(void);
 void dm_face_on_click(lv_event_t *e);
+void dm_face_repaint(void);
+void dm_word_face_click(void);
 
 /* pages */
 void dm_create_focus_home(void);
@@ -184,6 +211,35 @@ void dm_update_run_clock(void);
 void dm_health_add_focus_min(int32_t min);
 void dm_health_refresh(void);
 int dm_health_score(void);
+
+/* settings / wifi */
+void dm_create_settings(void);
+void dm_create_features(void);
+void dm_create_wifi(void);
+void dm_create_word(void);
+void dm_create_tools(void);
+void dm_create_life(void);
+void dm_create_fun(void);
+void dm_tools_tick(void);
+void dm_life_tick(void);
+void dm_fun_tick(void);
+void dm_wifi_tick(void);
+int dm_wifi_start_scan(void);
+int dm_wifi_connect(const char *ssid, const char *pass);
+const char *dm_wifi_cur_ssid(void);
+const char *dm_wifi_cur_ip(void);
+int dm_wifi_connected(void);
+int dm_wifi_ap_count(void);
+int dm_wifi_ap_get(int i, const char **ssid, int *rssi, bool *open);
+int dm_wifi_sel(void);
+void dm_wifi_set_sel(int i);
+int dm_wifi_scan_busy(void);
+int dm_wifi_scan_ready(void);
+void dm_wifi_clear_scan_ready(void);
+int dm_wifi_conn_busy(void);
+int dm_wifi_conn_ok(void);
+int dm_wifi_conn_fail(void);
+void dm_wifi_clear_conn_flags(void);
 
 /* roll */
 void dm_clock_create(dm_clock_t *c, lv_obj_t *parent, int x, int y, int w,

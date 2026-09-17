@@ -1,5 +1,6 @@
 /****************************************************************************
  * dm_face.c — geometric face: blink, look, more expressions, no click zoom
+ * Restored from contest2026 repo (dev-ai-contest-2026)
  ****************************************************************************/
 
 #include "deskmate.h"
@@ -14,6 +15,11 @@ static dm_face_t s_paint_face = FACE_IDLE;
 static int s_home_click_idx;
 
 static void paint(void);
+
+void dm_face_repaint(void)
+{
+  paint();
+}
 
 static void mk_part(lv_obj_t *parent, lv_obj_t **out, uint32_t col, int w,
                     int h, int radius)
@@ -537,12 +543,22 @@ static const dm_face_t s_home_faces[] = {
 
 static int s_run_click_idx;
 
+void dm_word_face_click(void);
+
 void dm_face_on_click(lv_event_t *e)
 {
   (void)e;
 
   if (!g_dm_face)
     {
+      return;
+    }
+
+  /* word pages: show study dialogue + expression */
+  if (g_dm.page == PAGE_WORD_STUDY || g_dm.page == PAGE_WORD_QUIZ ||
+      g_dm.page == PAGE_WORD_HOME || g_dm.page == PAGE_WORD_RES)
+    {
+      dm_word_face_click();
       return;
     }
 

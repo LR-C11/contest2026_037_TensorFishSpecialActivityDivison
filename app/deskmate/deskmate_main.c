@@ -76,12 +76,19 @@ int deskmate_main(int argc, FAR char *argv[])
   dm_create_health();
   dm_create_supervise();
   dm_create_note();
+  dm_create_features();
+  dm_create_word();
+  dm_create_tools();
+  dm_create_life();
+  dm_create_fun();
+  dm_create_settings();
+  dm_create_wifi();
   dm_create_dock();
   dm_show(PAGE_FOCUS_HOME);
 
   lv_timer_create(tick_cb, DM_TICK_MS, NULL);
 
-  LV_LOG_USER("Deskmate %s focus-home zh=%d", DM_VER, (int)g_dm.zh);
+  LV_LOG_USER("Deskmate " DM_VER " focus-home zh=%d", (int)g_dm.zh);
 
   while (true)
     {
