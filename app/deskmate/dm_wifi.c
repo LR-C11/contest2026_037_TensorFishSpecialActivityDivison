@@ -1,11 +1,12 @@
 /****************************************************************************
  * dm_wifi.c — WiFi backend aligned with official Gemini-S1 / NuttX guide
  *
- * Official connect sequence:
- *   wapi mode wlan0 2
- *   wapi psk wlan0 "<pass>" 3      (CCMP / WPA2)
- *   wapi essid wlan0 "<ssid>" 1
- *   renew wlan0
+ * Official connect sequence (ifconfig_cmd.md + board notes + wapi.c):
+ *   ifup wlan0 first
+ *   wapi mode wlan0 2          (WAPI_MODE_MANAGED)
+ *   wapi psk wlan0 '<pass>' 3  (3 = WPA_ALG_CCMP)
+ *   wapi essid wlan0 '<ssid>' 1 (1 = WAPI_ESSID_ON)
+ *   renew wlan0 / netlib_obtain_ipv4addr
  *
  * Official scan: wapi scan → escan_init + scan_stat + scan_coll
  * All work runs in a pthread (never on LVGL thread).
@@ -26,18 +27,12 @@
 #include <sys/ioctl.h>
 #include <wireless/wapi.h>
 #include <netutils/netlib.h>
-#include <nuttx/sdio.h>
-#include <arch/chip/realtek_wlan.h>
+#include <net/if.h>
 #include <syslog.h>
 
 #define DM_WIFI_IF "wlan0"
 #define DM_WIFI_AP_MAX 12
 #define DM_WIFI_STACK 65536
-
-/* board/driver bringup (same as wifi_test / realtek_wlan_bringup) */
-FAR struct sdio_dev_s *sdio_initialize(int sdcno);
-void set_sdio_param(int sdcno, int cd_mode,
-                    void (*card_detect_cb)(uint32_t present, uint16_t sdc_id));
 
 static volatile int s_drv_ready;
 
@@ -150,20 +145,25 @@ void dm_wifi_clear_conn_flags(void)
   s_conn_fail = 0;
 }
 
-/* escape for single-quoted shell argument */
+/* wrap as a single-quoted shell argument (NSH) */
 static void shell_quote(const char *in, char *out, size_t outsz)
 {
   size_t o = 0;
-  if (!in)
+  if (!in || outsz < 3)
     {
-      out[0] = 0;
+      if (out && outsz)
+        {
+          out[0] = 0;
+        }
       return;
     }
-  for (; *in && o + 2 < outsz; in++)
+  out[o++] = '\'';
+  for (; *in && o + 3 < outsz; in++)
     {
       if (*in == '\'')
         {
-          if (o + 4 >= outsz)
+          /* end quote, escaped quote, reopen: '\'' */
+          if (o + 5 >= outsz)
             {
               break;
             }
@@ -177,58 +177,49 @@ static void shell_quote(const char *in, char *out, size_t outsz)
           out[o++] = *in;
         }
     }
+  out[o++] = '\'';
   out[o] = 0;
 }
 
 static void cli_sta_up(void)
 {
-  /* official: wapi mode wlan0 2 (WAPI_MODE_MANAGED) */
+  /* doc / board notes:
+   *   ifup wlan0 first, then wapi mode, then psk / essid, then renew */
   (void)system("wapi mode wlan0 2");
+  (void)system("ifdown wlan0");
+  (void)system("ifup wlan0");
   (void)system("wapi power_save wlan0 off");
   (void)system("wapi country wlan0 CN");
 }
 
-/* Align with chips/r528/r528_wlan.c realtek_wlan_bringup:
- *   set_sdio_param(1,3,NULL); sdio_initialize(1);
- *   realtek_wl_sdio_init(); realtek_wl_initialize(mode)
- * Official boot uses mode=NONE(0) and never wifi_on.
- * We use STA(1) so wifi_on runs. */
-#define DM_RTW_MODE_STA 1
-
+/* Board r528_late_initialize already runs realtek_wlan_bringup().
+ * Calling realtek_wl_initialize / sdio_initialize from the app causes
+ * Data abort (gspi_dvobj_init: get wifi sdio function fail).
+ * Only use wlan0 if the kernel already created it. */
 static int ensure_driver(void)
 {
-  FAR struct sdio_dev_s *sdio;
-  int ret;
+  int i;
 
   if (s_drv_ready)
     {
       return 0;
     }
 
-  syslog(LOG_INFO, "[deskmate-wifi] bringup sdc1...\n");
-  set_sdio_param(1, 3, NULL);
-  sdio = sdio_initialize(1);
-  if (sdio == NULL)
+  /* wait briefly — driver may still be probing */
+  for (i = 0; i < 10; i++)
     {
-      syslog(LOG_ERR, "[deskmate-wifi] sdio_initialize failed\n");
-      return -1;
+      if (if_nametoindex(DM_WIFI_IF) != 0)
+        {
+          s_drv_ready = 1;
+          syslog(LOG_INFO, "[deskmate-wifi] %s ready\n", DM_WIFI_IF);
+          return 0;
+        }
+      usleep(100 * 1000);
     }
-  ret = realtek_wl_sdio_init(sdio);
-  if (ret != 0)
-    {
-      syslog(LOG_ERR, "[deskmate-wifi] sdio_init failed %d\n", ret);
-      return ret;
-    }
-  syslog(LOG_INFO, "[deskmate-wifi] realtek_wl_initialize STA\n");
-  ret = realtek_wl_initialize(DM_RTW_MODE_STA);
-  if (ret < 0)
-    {
-      syslog(LOG_ERR, "[deskmate-wifi] initialize failed %d\n", ret);
-      return ret;
-    }
-  s_drv_ready = 1;
-  syslog(LOG_INFO, "[deskmate-wifi] bringup ok\n");
-  return 0;
+
+  syslog(LOG_ERR, "[deskmate-wifi] %s missing — do not init from app\n",
+         DM_WIFI_IF);
+  return -1;
 }
 
 static int collect_aps(int sock)
@@ -352,13 +343,15 @@ int dm_wifi_start_scan(void)
   return 0;
 }
 
-/* official CLI connect — proven on this board */
+/* official CLI connect — ifup → psk(ccmp=3) → essid(on=1) → renew */
 static void *conn_thread(void *arg)
 {
   char cmd[192];
   char qssid[80];
   char qpass[160];
+  int sock;
   int ret;
+  int is_up = 0;
   struct in_addr addr;
 
   (void)arg;
@@ -370,27 +363,51 @@ static void *conn_thread(void *arg)
       return NULL;
     }
 
+  sock = wapi_make_socket();
+  if (sock >= 0)
+    {
+      /* managed mode then bring iface up (doc: ifup first on board) */
+      (void)wapi_set_mode(sock, DM_WIFI_IF, WAPI_MODE_MANAGED);
+      (void)wapi_set_ifdown(sock, DM_WIFI_IF);
+      usleep(200 * 1000);
+      (void)wapi_set_ifup(sock, DM_WIFI_IF);
+      (void)wapi_get_ifup(sock, DM_WIFI_IF, &is_up);
+      (void)wapi_set_power_save(sock, DM_WIFI_IF, false);
+      close(sock);
+    }
+
   cli_sta_up();
 
+  /* credentials: wapi psk <if> <pass> 3   (3 = WPA_ALG_CCMP)
+   *              wapi essid <if> <ssid> 1 (1 = WAPI_ESSID_ON) */
   if (!s_pending_open && s_pending_pass[0])
     {
       shell_quote(s_pending_pass, qpass, sizeof(qpass));
-      snprintf(cmd, sizeof(cmd), "wapi psk wlan0 %s 3", qpass);
+      snprintf(cmd, sizeof(cmd), "wapi psk %s %s 3", DM_WIFI_IF, qpass);
       (void)system(cmd);
     }
 
   shell_quote(s_pending_ssid, qssid, sizeof(qssid));
-  snprintf(cmd, sizeof(cmd), "wapi essid wlan0 %s 1", qssid);
+  snprintf(cmd, sizeof(cmd), "wapi essid %s %s 1", DM_WIFI_IF, qssid);
   (void)system(cmd);
 
-  /* wait 4-way handshake then official renew */
-  sleep(4);
+  /* 4-way handshake */
+  sleep(3);
+
+  /* renew = netlib_obtain_ipv4addr (dhcpc renew_main) */
   (void)system("renew wlan0");
-  sleep(2);
+  ret = netlib_obtain_ipv4addr(DM_WIFI_IF);
+  if (ret < 0)
+    {
+      sleep(1);
+      (void)system("renew wlan0");
+      ret = netlib_obtain_ipv4addr(DM_WIFI_IF);
+    }
+  sleep(1);
 
   ret = netlib_get_ipv4addr(DM_WIFI_IF, &addr);
   pthread_mutex_lock(&s_lock);
-  if (ret == 0 && addr.s_addr != 0)
+  if (ret == 0 && addr.s_addr != 0 && addr.s_addr != 0xffffffffu)
     {
       strncpy(s_cur_ssid, s_pending_ssid, sizeof(s_cur_ssid) - 1);
       s_cur_ssid[sizeof(s_cur_ssid) - 1] = 0;
@@ -399,7 +416,7 @@ static void *conn_thread(void *arg)
     }
   else
     {
-      /* link may be up without DHCP yet — still treat as connected if essid set */
+      /* essid applied; DHCP may still be pending — mark connected */
       strncpy(s_cur_ssid, s_pending_ssid, sizeof(s_cur_ssid) - 1);
       s_cur_ssid[sizeof(s_cur_ssid) - 1] = 0;
       s_cur_ip[0] = 0;
@@ -408,12 +425,12 @@ static void *conn_thread(void *arg)
 
   if (s_cur_ip[0] == 0 || strcmp(s_cur_ip, "0.0.0.0") == 0)
     {
-      /* one more DHCP try */
       (void)system("renew wlan0");
       sleep(2);
-      if (netlib_get_ipv4addr(DM_WIFI_IF, &addr) == 0)
+      if (netlib_get_ipv4addr(DM_WIFI_IF, &addr) == 0 && addr.s_addr != 0)
         {
           strncpy(s_cur_ip, inet_ntoa(addr), sizeof(s_cur_ip) - 1);
+          s_cur_ip[sizeof(s_cur_ip) - 1] = 0;
         }
     }
 

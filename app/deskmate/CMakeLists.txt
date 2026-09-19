@@ -20,5 +20,7 @@ if(CONFIG_DESKMATE_APP)
       dm_ui_tools.c
       dm_ui_life.c
       dm_ui_fun.c
+      dm_ui_med.c
+      dm_ui_bt.c
     INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR})
 endif()

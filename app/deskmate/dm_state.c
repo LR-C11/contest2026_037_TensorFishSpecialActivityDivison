@@ -204,7 +204,8 @@ void dm_show(dm_page_t p)
           p == PAGE_WORD_LIST || p == PAGE_WORD_WSET || p == PAGE_CALC ||
           p == PAGE_SENSORS || p == PAGE_GUESS || p == PAGE_CONVERT ||
           p == PAGE_WATER || p == PAGE_COUNTDOWN || p == PAGE_EAT ||
-          p == PAGE_24 || p == PAGE_DRAW || p == PAGE_BMI)
+          p == PAGE_24 || p == PAGE_DRAW || p == PAGE_BMI || p == PAGE_MED ||
+          p == PAGE_MED_ADD || p == PAGE_BT)
         {
           lv_obj_add_flag(g_dm_dock, LV_OBJ_FLAG_HIDDEN);
         }
@@ -246,6 +247,8 @@ void dm_tick(void)
   dm_tools_tick();
   dm_life_tick();
   dm_fun_tick();
+  dm_med_tick();
+  dm_bt_tick();
 }
 
 #endif /* CONFIG_DESKMATE_APP */
