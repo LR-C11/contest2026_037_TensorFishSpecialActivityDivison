@@ -11,8 +11,8 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DRAW_W 300
-#define DRAW_H 160
+#define DRAW_W 240
+#define DRAW_H 168
 
 static void fun_back(lv_event_t *e)
 {
@@ -59,7 +59,7 @@ static const char *const s_food[4][8] = {
 
 static lv_obj_t *s_eat_out;
 static lv_obj_t *s_eat_sub;
-static lv_obj_t *s_eat_timer;
+static lv_timer_t *s_eat_timer;
 static int s_eat_set;
 static int s_eat_idx;
 static bool s_eat_spin;
@@ -343,6 +343,7 @@ void dm_create_24(void)
 static lv_obj_t *s_draw_cv;
 static lv_color_t *s_draw_buf;
 static int s_draw_w = 2;
+static uint32_t s_draw_col = 0x7DD3FC;
 static bool s_draw_down;
 static lv_point_t s_draw_last;
 
@@ -380,7 +381,7 @@ static void draw_dot(int x, int y)
             }
           if (dx * dx + dy * dy <= r * r + 1)
             {
-              lv_canvas_set_px(s_draw_cv, px, py, lv_color_hex(C_ACCENT),
+              lv_canvas_set_px(s_draw_cv, px, py, lv_color_hex(s_draw_col),
                                LV_OPA_COVER);
             }
         }
@@ -471,15 +472,25 @@ static void draw_w_cb(lv_event_t *e)
   s_draw_w = (int)(intptr_t)lv_event_get_user_data(e);
 }
 
+static void draw_col_cb(lv_event_t *e)
+{
+  s_draw_col = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+}
+
 void dm_create_draw(void)
 {
   lv_obj_t *page = mk_fun_page(PAGE_DRAW, "画板涂鸦", "Draw");
   lv_obj_t *b;
   size_t sz = DRAW_W * DRAW_H * sizeof(lv_color_t);
+  static const uint32_t cols[8] = {
+    0xFFFFFF, 0xFF6B8A, 0xFFD54F, 0x6BCB77,
+    0x7DD3FC, 0xB388FF, 0xFF8A3D, 0x4DD0E1,
+  };
+  int i;
 
   s_draw_buf = (lv_color_t *)lv_malloc(sz);
   s_draw_cv = lv_canvas_create(page);
-  lv_obj_set_pos(s_draw_cv, 10, 40);
+  lv_obj_set_pos(s_draw_cv, 6, 34);
   lv_canvas_set_buffer(s_draw_cv, s_draw_buf, DRAW_W, DRAW_H,
                        LV_COLOR_FORMAT_RGB565);
   draw_clear_buf();
@@ -488,18 +499,28 @@ void dm_create_draw(void)
   lv_obj_add_event_cb(s_draw_cv, draw_move_cb, LV_EVENT_PRESSING, NULL);
   lv_obj_add_event_cb(s_draw_cv, draw_rel_cb, LV_EVENT_RELEASED, NULL);
 
-  b = dm_btn(page, "清屏", "Clear", 68, 28, C_BTN, C_INK, draw_clear_cb,
+  /* tools on the RIGHT so they don't cover the back button */
+  b = dm_btn(page, "清屏", "Clr", 60, 22, C_BTN, C_INK, draw_clear_cb,
              NULL);
-  lv_obj_set_pos(b, 8, 206);
-  b = dm_btn(page, "细", "S", 68, 28, 0x0d3a4a, C_ACCENT, draw_w_cb,
+  lv_obj_set_pos(b, 252, 36);
+  b = dm_btn(page, "细", "S", 60, 22, 0x0d3a4a, C_ACCENT, draw_w_cb,
              (void *)(intptr_t)1);
-  lv_obj_set_pos(b, 84, 206);
-  b = dm_btn(page, "中", "M", 68, 28, 0x0d3a4a, C_ACCENT, draw_w_cb,
+  lv_obj_set_pos(b, 252, 62);
+  b = dm_btn(page, "中", "M", 60, 22, 0x0d3a4a, C_ACCENT, draw_w_cb,
              (void *)(intptr_t)2);
-  lv_obj_set_pos(b, 160, 206);
-  b = dm_btn(page, "粗", "L", 68, 28, 0x0d3a4a, C_ACCENT, draw_w_cb,
+  lv_obj_set_pos(b, 252, 88);
+  b = dm_btn(page, "粗", "L", 60, 22, 0x0d3a4a, C_ACCENT, draw_w_cb,
              (void *)(intptr_t)3);
-  lv_obj_set_pos(b, 236, 206);
+  lv_obj_set_pos(b, 252, 114);
+
+  /* palette bottom */
+  for (i = 0; i < 8; i++)
+    {
+      b = dm_btn(page, " ", " ", 32, 22, cols[i], cols[i], draw_col_cb,
+                 (void *)(uintptr_t)cols[i]);
+      lv_obj_set_pos(b, 8 + i * 38, 206);
+      lv_obj_set_style_radius(b, 11, LV_PART_MAIN);
+    }
 }
 
 /* ---------- BMI ---------- */

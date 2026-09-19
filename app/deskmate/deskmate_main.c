@@ -81,6 +81,8 @@ int deskmate_main(int argc, FAR char *argv[])
   dm_create_tools();
   dm_create_life();
   dm_create_fun();
+  dm_create_med();
+  dm_create_bt();
   dm_create_settings();
   dm_create_wifi();
   dm_create_dock();

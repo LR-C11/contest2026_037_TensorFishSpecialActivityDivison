@@ -271,6 +271,12 @@ static void done_ok(lv_event_t *e)
   dm_show(PAGE_WIFI);
 }
 
+static void open_bt(lv_event_t *e)
+{
+  (void)e;
+  dm_show(PAGE_BT);
+}
+
 /* ---------- pages ---------- */
 
 void dm_create_settings(void)
@@ -296,8 +302,23 @@ void dm_create_settings(void)
   arrow = dm_lbl(c1, "›", "›", g_dm_font_m, C_MUTED);
   lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -4, 0);
 
+  /* Bluetooth — same pattern as Wi-Fi */
+  c1 = card(s_set_page, 56);
+  lv_obj_align(c1, LV_ALIGN_TOP_MID, 0, 104);
+  lv_obj_add_flag(c1, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(c1, open_bt, LV_EVENT_CLICKED, NULL);
+  name = dm_lbl(c1, "蓝牙", "Bluetooth", g_dm_font_s, C_INK);
+  lv_obj_set_pos(name, 0, 2);
+  {
+    lv_obj_t *sub = dm_lbl(c1, "扫描 / 连接设备", "Scan / connect",
+                           g_dm_font_s, C_MUTED);
+    lv_obj_set_pos(sub, 0, 22);
+  }
+  arrow = dm_lbl(c1, "›", "›", g_dm_font_m, C_MUTED);
+  lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -4, 0);
+
   c2 = card(s_set_page, 48);
-  lv_obj_align(c2, LV_ALIGN_TOP_MID, 0, 104);
+  lv_obj_align(c2, LV_ALIGN_TOP_MID, 0, 168);
   name = dm_lbl(c2, "关于", "About", g_dm_font_s, C_INK);
   lv_obj_set_pos(name, 0, 2);
   {

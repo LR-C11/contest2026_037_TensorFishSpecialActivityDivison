@@ -12,7 +12,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.6.5"
+#define DM_VER "0.7.6"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -66,6 +66,9 @@ typedef enum {
   PAGE_24,
   PAGE_DRAW,
   PAGE_BMI,
+  PAGE_MED,
+  PAGE_MED_ADD,
+  PAGE_BT,
   PAGE_COUNT
 } dm_page_t;
 
@@ -220,9 +223,13 @@ void dm_create_word(void);
 void dm_create_tools(void);
 void dm_create_life(void);
 void dm_create_fun(void);
+void dm_create_med(void);
+void dm_create_bt(void);
 void dm_tools_tick(void);
 void dm_life_tick(void);
 void dm_fun_tick(void);
+void dm_med_tick(void);
+void dm_bt_tick(void);
 void dm_wifi_tick(void);
 int dm_wifi_start_scan(void);
 int dm_wifi_connect(const char *ssid, const char *pass);

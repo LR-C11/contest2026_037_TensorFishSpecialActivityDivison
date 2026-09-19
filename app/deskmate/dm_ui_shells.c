@@ -131,6 +131,7 @@ void dm_create_features(void)
     { "24 点", "24", "四张牌凑 24", "Make 24", PAGE_24 },
     { "画板涂鸦", "Draw", "随手画两笔", "Doodle", PAGE_DRAW },
     { "BMI 计算", "BMI", "身高体重评估", "BMI check", PAGE_BMI },
+    { "吃药", "Meds", "按时吃药提醒", "Med reminder", PAGE_MED },
   };
   lv_obj_t *page = lv_obj_create(g_dm_root);
   lv_obj_t *title;
@@ -215,12 +216,13 @@ void dm_dock_highlight(dm_page_t p)
            p == PAGE_WORD_LIST || p == PAGE_WORD_WSET || p == PAGE_CALC ||
            p == PAGE_SENSORS || p == PAGE_GUESS || p == PAGE_CONVERT ||
            p == PAGE_WATER || p == PAGE_COUNTDOWN || p == PAGE_EAT ||
-           p == PAGE_24 || p == PAGE_DRAW || p == PAGE_BMI)
+           p == PAGE_24 || p == PAGE_DRAW || p == PAGE_BMI || p == PAGE_MED ||
+           p == PAGE_MED_ADD)
     {
       focus_key = PAGE_FEATURES;
     }
   else if (p == PAGE_WIFI || p == PAGE_WIFI_PW || p == PAGE_WIFI_CONN ||
-           p == PAGE_WIFI_DONE)
+           p == PAGE_WIFI_DONE || p == PAGE_BT)
     {
       focus_key = PAGE_SETTINGS;
     }
