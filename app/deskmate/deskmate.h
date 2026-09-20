@@ -12,7 +12,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.7.6"
+#define DM_VER "0.13.0"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -37,12 +37,15 @@
 typedef enum {
   PAGE_FOCUS_HOME = 0,
   PAGE_FOCUS_RUN,
+  PAGE_FOCUS_DONE,
   PAGE_CHAT,
   PAGE_HEALTH,
   PAGE_MOOD_LOG,
   PAGE_FEATURES,
   PAGE_SUPERVISE,
   PAGE_NOTE,
+  PAGE_NOTE_ADD,
+  PAGE_NOTE_KB,
   PAGE_SETTINGS,
   PAGE_WIFI,
   PAGE_WIFI_PW,
@@ -68,7 +71,11 @@ typedef enum {
   PAGE_BMI,
   PAGE_MED,
   PAGE_MED_ADD,
-  PAGE_BT,
+  PAGE_MED_KB,
+  PAGE_2048,
+  PAGE_MBTI,
+  PAGE_MBTI_Q,
+  PAGE_MBTI_RESULT,
   PAGE_COUNT
 } dm_page_t;
 
@@ -197,10 +204,17 @@ void dm_word_face_click(void);
 /* pages */
 void dm_create_focus_home(void);
 void dm_create_focus_run(void);
+void dm_create_focus_done(void);
+void dm_focus_show_done(int32_t minutes);
 void dm_create_chat(void);
 void dm_create_health(void);
+void dm_create_2048(void);
+void dm_create_mbti(void);
+void dm_chat_tick(void);
+int dm_chat_ai_available(void);
+const char *dm_chat_ai_ask(const char *user_text);
+const char *dm_chat_local_reply(const char *user_text);
 void dm_create_supervise(void);
-void dm_create_note(void);
 void dm_create_dock(void);
 void dm_dock_highlight(dm_page_t p);
 void dm_focus_home_tick(void);
@@ -224,15 +238,16 @@ void dm_create_tools(void);
 void dm_create_life(void);
 void dm_create_fun(void);
 void dm_create_med(void);
-void dm_create_bt(void);
+void dm_create_note(void);
+void dm_med_kb_open(void);
 void dm_tools_tick(void);
 void dm_life_tick(void);
 void dm_fun_tick(void);
 void dm_med_tick(void);
-void dm_bt_tick(void);
 void dm_wifi_tick(void);
 int dm_wifi_start_scan(void);
 int dm_wifi_connect(const char *ssid, const char *pass);
+void dm_wifi_auto_start(void);
 const char *dm_wifi_cur_ssid(void);
 const char *dm_wifi_cur_ip(void);
 int dm_wifi_connected(void);

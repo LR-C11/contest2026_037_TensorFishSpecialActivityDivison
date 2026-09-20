@@ -673,6 +673,7 @@ void dm_create_fun(void)
   dm_create_24();
   dm_create_draw();
   dm_create_bmi();
+  dm_create_2048();
 }
 
 void dm_fun_tick(void)

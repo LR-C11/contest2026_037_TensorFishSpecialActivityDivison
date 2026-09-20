@@ -56,12 +56,7 @@ static lv_obj_t *mk_shell(dm_page_t id, const char *zh_title,
   return page;
 }
 
-void dm_create_chat(void)
-{
-  mk_shell(PAGE_CHAT, "聊天", "Chat",
-           "无聊时我会陪你聊。\n完整对话能力稍后接入。",
-           "I'll keep you company.\nFull chat comes later.");
-}
+/* dm_create_chat implemented in dm_ui_chat.c */
 
 static void back_features(lv_event_t *e)
 {
@@ -82,18 +77,7 @@ void dm_create_supervise(void)
     }
 }
 
-void dm_create_note(void)
-{
-  mk_shell(PAGE_NOTE, "备忘", "Notes",
-           "帮你记一下东西。\n列表与持久化骨架已就绪。",
-           "I'll remember things for you.");
-  if (g_dm_pages[PAGE_NOTE])
-    {
-      lv_obj_t *b = dm_btn(g_dm_pages[PAGE_NOTE], "←", "<", 36, 24, C_BTN,
-                           C_MUTED, back_features, NULL);
-      lv_obj_set_pos(b, 8, 8);
-    }
-}
+/* dm_create_note implemented in dm_ui_note.c */
 
 static void fn_row_cb(lv_event_t *e)
 {
@@ -132,6 +116,9 @@ void dm_create_features(void)
     { "画板涂鸦", "Draw", "随手画两笔", "Doodle", PAGE_DRAW },
     { "BMI 计算", "BMI", "身高体重评估", "BMI check", PAGE_BMI },
     { "吃药", "Meds", "按时吃药提醒", "Med reminder", PAGE_MED },
+    { "2048", "2048", "滑动合并数字", "Merge tiles", PAGE_2048 },
+    { "MBTI 测试", "MBTI", "4 套题库 · 随机 52 题", "4 banks · random 52",
+      PAGE_MBTI },
   };
   lv_obj_t *page = lv_obj_create(g_dm_root);
   lv_obj_t *title;
@@ -202,7 +189,7 @@ void dm_dock_highlight(dm_page_t p)
   int i;
   dm_page_t focus_key = p;
 
-  if (p == PAGE_FOCUS_RUN)
+  if (p == PAGE_FOCUS_RUN || p == PAGE_FOCUS_DONE)
     {
       focus_key = PAGE_FOCUS_HOME;
     }
@@ -217,12 +204,14 @@ void dm_dock_highlight(dm_page_t p)
            p == PAGE_SENSORS || p == PAGE_GUESS || p == PAGE_CONVERT ||
            p == PAGE_WATER || p == PAGE_COUNTDOWN || p == PAGE_EAT ||
            p == PAGE_24 || p == PAGE_DRAW || p == PAGE_BMI || p == PAGE_MED ||
-           p == PAGE_MED_ADD)
+           p == PAGE_MED_ADD || p == PAGE_MED_KB || p == PAGE_2048 ||
+           p == PAGE_MBTI || p == PAGE_MBTI_Q || p == PAGE_MBTI_RESULT ||
+           p == PAGE_NOTE_ADD || p == PAGE_NOTE_KB)
     {
       focus_key = PAGE_FEATURES;
     }
   else if (p == PAGE_WIFI || p == PAGE_WIFI_PW || p == PAGE_WIFI_CONN ||
-           p == PAGE_WIFI_DONE || p == PAGE_BT)
+           p == PAGE_WIFI_DONE)
     {
       focus_key = PAGE_SETTINGS;
     }

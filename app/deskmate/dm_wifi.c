@@ -1,13 +1,15 @@
 /****************************************************************************
  * dm_wifi.c — WiFi backend aligned with official Gemini-S1 / NuttX guide
  *
- * Official connect sequence (ifconfig_cmd.md + board notes + wapi.c):
+ * Official connect sequence (ifconfig_cmd.md + community notes + wapi.c):
  *   ifup wlan0 first
  *   wapi mode wlan0 2          (WAPI_MODE_MANAGED)
  *   wapi psk wlan0 '<pass>' 3  (3 = WPA_ALG_CCMP)
  *   wapi essid wlan0 '<ssid>' 1 (1 = WAPI_ESSID_ON)
  *   renew wlan0 / netlib_obtain_ipv4addr
  *
+ * Auto-connect: default Xiaomi AP + optional /data saved credentials.
+ * Manual scan/connect UI is unchanged.
  * Official scan: wapi scan → escan_init + scan_stat + scan_coll
  * All work runs in a pthread (never on LVGL thread).
  ****************************************************************************/
@@ -34,7 +36,13 @@
 #define DM_WIFI_AP_MAX 12
 #define DM_WIFI_STACK 65536
 
+/* Default home AP — boot auto-connect; manual UI still works. */
+#define DM_WIFI_AUTO_SSID "Xiaomi_0521_Wi-Fi5"
+#define DM_WIFI_AUTO_PSK "kisslcy520"
+#define DM_WIFI_SAVE_PATH "/data/deskmate_wifi.txt"
+
 static volatile int s_drv_ready;
+static volatile int s_auto_started;
 
 typedef struct
 {
@@ -145,68 +153,122 @@ void dm_wifi_clear_conn_flags(void)
   s_conn_fail = 0;
 }
 
-/* wrap as a single-quoted shell argument (NSH) */
-static void shell_quote(const char *in, char *out, size_t outsz)
+/* NSH-safe single-quote wrap; reject embedded quotes */
+static int shell_quote(const char *in, char *out, size_t outsz)
 {
+  size_t n;
   size_t o = 0;
-  if (!in || outsz < 3)
+
+  if (!in || !out || outsz < 3)
     {
-      if (out && outsz)
-        {
-          out[0] = 0;
-        }
-      return;
+      return -1;
+    }
+  if (strchr(in, '\'') != NULL)
+    {
+      return -1;
+    }
+  n = strlen(in);
+  if (n + 3 > outsz)
+    {
+      return -1;
     }
   out[o++] = '\'';
-  for (; *in && o + 3 < outsz; in++)
-    {
-      if (*in == '\'')
-        {
-          /* end quote, escaped quote, reopen: '\'' */
-          if (o + 5 >= outsz)
-            {
-              break;
-            }
-          out[o++] = '\'';
-          out[o++] = '\\';
-          out[o++] = '\'';
-          out[o++] = '\'';
-        }
-      else
-        {
-          out[o++] = *in;
-        }
-    }
+  memcpy(out + o, in, n);
+  o += n;
   out[o++] = '\'';
   out[o] = 0;
+  return 0;
 }
 
 static void cli_sta_up(void)
 {
-  /* doc / board notes:
-   *   ifup wlan0 first, then wapi mode, then psk / essid, then renew */
+  /* Official §9 + review: ifup FIRST, then STA mode, ifup again.
+   * Do not ifdown — avoid tearing radio before psk. */
+  syslog(LOG_INFO, "[deskmate-wifi] ifup → mode STA → ifup\n");
+  (void)system("ifup wlan0");
   (void)system("wapi mode wlan0 2");
-  (void)system("ifdown wlan0");
   (void)system("ifup wlan0");
   (void)system("wapi power_save wlan0 off");
   (void)system("wapi country wlan0 CN");
 }
 
+static int wifi_get_valid_ip(struct in_addr *addr)
+{
+  if (netlib_get_ipv4addr(DM_WIFI_IF, addr) != 0)
+    {
+      return -1;
+    }
+  if (addr->s_addr == 0 || addr->s_addr == 0xffffffffu)
+    {
+      return -1;
+    }
+  return 0;
+}
+
+static void wifi_cred_save(const char *ssid, const char *pass)
+{
+  FILE *f;
+
+  if (!ssid || !ssid[0])
+    {
+      return;
+    }
+  f = fopen(DM_WIFI_SAVE_PATH, "w");
+  if (!f)
+    {
+      return;
+    }
+  fprintf(f, "%s\n%s\n", ssid, pass ? pass : "");
+  fclose(f);
+}
+
+static int wifi_cred_load(char *ssid, size_t slen, char *pass, size_t plen)
+{
+  FILE *f = fopen(DM_WIFI_SAVE_PATH, "r");
+  char line[80];
+
+  if (!f)
+    {
+      return -1;
+    }
+  if (!fgets(line, sizeof(line), f))
+    {
+      fclose(f);
+      return -1;
+    }
+  line[strcspn(line, "\r\n")] = 0;
+  if (!line[0])
+    {
+      fclose(f);
+      return -1;
+    }
+  snprintf(ssid, slen, "%s", line);
+  if (fgets(line, sizeof(line), f))
+    {
+      line[strcspn(line, "\r\n")] = 0;
+      snprintf(pass, plen, "%s", line);
+    }
+  else
+    {
+      pass[0] = 0;
+    }
+  fclose(f);
+  return 0;
+}
+
 /* Board r528_late_initialize already runs realtek_wlan_bringup().
- * Calling realtek_wl_initialize / sdio_initialize from the app causes
- * Data abort (gspi_dvobj_init: get wifi sdio function fail).
- * Only use wlan0 if the kernel already created it. */
-static int ensure_driver(void)
+ * App must NOT call driver init (data abort). Wait longer for wlan0:
+ * board STA bringup can finish after deskmate starts. */
+static int ensure_driver_wait(int attempts_100ms)
 {
   int i;
 
-  if (s_drv_ready)
+  if (s_drv_ready && if_nametoindex(DM_WIFI_IF) != 0)
     {
       return 0;
     }
 
-  /* wait briefly — driver may still be probing */
-  for (i = 0; i < 10; i++)
+  for (i = 0; i < attempts_100ms; i++)
     {
       if (if_nametoindex(DM_WIFI_IF) != 0)
         {
@@ -217,9 +279,17 @@ static int ensure_driver(void)
       usleep(100 * 1000);
     }
 
-  syslog(LOG_ERR, "[deskmate-wifi] %s missing — do not init from app\n",
+  s_drv_ready = 0;
+  syslog(LOG_ERR,
+         "[deskmate-wifi] %s missing — board bringup not ready yet\n",
          DM_WIFI_IF);
   return -1;
+}
+
+static int ensure_driver(void)
+{
+  /* ~20s first wait; auto thread retries later */
+  return ensure_driver_wait(200);
 }
 
 static int collect_aps(int sock)
@@ -343,18 +413,33 @@ int dm_wifi_start_scan(void)
   return 0;
 }
 
-/* official CLI connect — ifup → psk(ccmp=3) → essid(on=1) → renew */
+/* Official connect — ifup → mode → psk(ccmp=3) → essid(1) → wait → renew */
 static void *conn_thread(void *arg)
 {
   char cmd[192];
   char qssid[80];
   char qpass[160];
-  int sock;
   int ret;
-  int is_up = 0;
+  int i;
+  int got_ip = 0;
   struct in_addr addr;
+  char try_ssid[33];
+  char try_pass[64];
 
   (void)arg;
+
+  strncpy(try_ssid, s_pending_ssid, sizeof(try_ssid) - 1);
+  try_ssid[sizeof(try_ssid) - 1] = 0;
+  strncpy(try_pass, s_pending_pass, sizeof(try_pass) - 1);
+  try_pass[sizeof(try_pass) - 1] = 0;
+
+  if (try_ssid[0] == 0 || if_nametoindex(DM_WIFI_IF) == 0)
+    {
+      syslog(LOG_ERR, "[deskmate-wifi] connect abort: no ssid/wlan0\n");
+      s_conn_busy = 0;
+      s_conn_fail = 1;
+      return NULL;
+    }
 
   if (ensure_driver() < 0)
     {
@@ -363,85 +448,85 @@ static void *conn_thread(void *arg)
       return NULL;
     }
 
-  sock = wapi_make_socket();
-  if (sock >= 0)
-    {
-      /* managed mode then bring iface up (doc: ifup first on board) */
-      (void)wapi_set_mode(sock, DM_WIFI_IF, WAPI_MODE_MANAGED);
-      (void)wapi_set_ifdown(sock, DM_WIFI_IF);
-      usleep(200 * 1000);
-      (void)wapi_set_ifup(sock, DM_WIFI_IF);
-      (void)wapi_get_ifup(sock, DM_WIFI_IF, &is_up);
-      (void)wapi_set_power_save(sock, DM_WIFI_IF, false);
-      close(sock);
-    }
-
+  /* 1) ifup + STA mode (separate system calls — no NSH &&) */
   cli_sta_up();
 
-  /* credentials: wapi psk <if> <pass> 3   (3 = WPA_ALG_CCMP)
-   *              wapi essid <if> <ssid> 1 (1 = WAPI_ESSID_ON) */
+  /* 2) psk — WPA_ALG_CCMP = 3 (guide §1.3.2 / §9.2) */
   if (!s_pending_open && s_pending_pass[0])
     {
-      shell_quote(s_pending_pass, qpass, sizeof(qpass));
+      if (shell_quote(s_pending_pass, qpass, sizeof(qpass)) < 0)
+        {
+          s_conn_busy = 0;
+          s_conn_fail = 1;
+          return NULL;
+        }
       snprintf(cmd, sizeof(cmd), "wapi psk %s %s 3", DM_WIFI_IF, qpass);
+      syslog(LOG_INFO, "[deskmate-wifi] %s\n", cmd);
+      (void)system(cmd);
+
+      /* optional explicit WPA2 version — ignore failure */
+      snprintf(cmd, sizeof(cmd), "wapi psk %s %s 3 2", DM_WIFI_IF, qpass);
       (void)system(cmd);
     }
 
-  shell_quote(s_pending_ssid, qssid, sizeof(qssid));
-  snprintf(cmd, sizeof(cmd), "wapi essid %s %s 1", DM_WIFI_IF, qssid);
-  (void)system(cmd);
-
-  /* 4-way handshake */
-  sleep(3);
-
-  /* renew = netlib_obtain_ipv4addr (dhcpc renew_main) */
-  (void)system("renew wlan0");
-  ret = netlib_obtain_ipv4addr(DM_WIFI_IF);
-  if (ret < 0)
-    {
-      sleep(1);
-      (void)system("renew wlan0");
-      ret = netlib_obtain_ipv4addr(DM_WIFI_IF);
-    }
-  sleep(1);
-
-  ret = netlib_get_ipv4addr(DM_WIFI_IF, &addr);
-  pthread_mutex_lock(&s_lock);
-  if (ret == 0 && addr.s_addr != 0 && addr.s_addr != 0xffffffffu)
-    {
-      strncpy(s_cur_ssid, s_pending_ssid, sizeof(s_cur_ssid) - 1);
-      s_cur_ssid[sizeof(s_cur_ssid) - 1] = 0;
-      strncpy(s_cur_ip, inet_ntoa(addr), sizeof(s_cur_ip) - 1);
-      s_cur_ip[sizeof(s_cur_ip) - 1] = 0;
-    }
-  else
-    {
-      /* essid applied; DHCP may still be pending — mark connected */
-      strncpy(s_cur_ssid, s_pending_ssid, sizeof(s_cur_ssid) - 1);
-      s_cur_ssid[sizeof(s_cur_ssid) - 1] = 0;
-      s_cur_ip[0] = 0;
-    }
-  pthread_mutex_unlock(&s_lock);
-
-  if (s_cur_ip[0] == 0 || strcmp(s_cur_ip, "0.0.0.0") == 0)
-    {
-      (void)system("renew wlan0");
-      sleep(2);
-      if (netlib_get_ipv4addr(DM_WIFI_IF, &addr) == 0 && addr.s_addr != 0)
-        {
-          strncpy(s_cur_ip, inet_ntoa(addr), sizeof(s_cur_ip) - 1);
-          s_cur_ip[sizeof(s_cur_ip) - 1] = 0;
-        }
-    }
-
-  if (s_cur_ssid[0] == 0)
+  /* 3) essid — flag 1 = connect */
+  if (shell_quote(s_pending_ssid, qssid, sizeof(qssid)) < 0)
     {
       s_conn_busy = 0;
       s_conn_fail = 1;
       return NULL;
     }
+  snprintf(cmd, sizeof(cmd), "wapi essid %s %s 1", DM_WIFI_IF, qssid);
+  syslog(LOG_INFO, "[deskmate-wifi] %s\n", cmd);
+  (void)system(cmd);
+
+  /* 4) WPA2 4-way handshake / associate */
+  sleep(3);
+
+  /* 5) DHCP renew — retry loop (review: 2s too short once is not enough) */
+  for (i = 0; i < 5; i++)
+    {
+      (void)system("renew wlan0");
+      ret = netlib_obtain_ipv4addr(DM_WIFI_IF);
+      if (ret >= 0 && wifi_get_valid_ip(&addr) == 0)
+        {
+          got_ip = 1;
+          break;
+        }
+      syslog(LOG_WARNING, "[deskmate-wifi] renew retry %d\n", i + 1);
+      sleep(3);
+    }
+
+  pthread_mutex_lock(&s_lock);
+  strncpy(s_cur_ssid, try_ssid, sizeof(s_cur_ssid) - 1);
+  s_cur_ssid[sizeof(s_cur_ssid) - 1] = 0;
+  if (got_ip)
+    {
+      strncpy(s_cur_ip, inet_ntoa(addr), sizeof(s_cur_ip) - 1);
+      s_cur_ip[sizeof(s_cur_ip) - 1] = 0;
+    }
+  else
+    {
+      s_cur_ip[0] = 0;
+    }
+  pthread_mutex_unlock(&s_lock);
+
+  if (!got_ip)
+    {
+      syslog(LOG_ERR,
+             "[deskmate-wifi] connect fail: no IP after renew "
+             "(ssid=%s wlan0=%d)\n",
+             try_ssid, (int)if_nametoindex(DM_WIFI_IF));
+      s_conn_busy = 0;
+      s_conn_fail = 1;
+      return NULL;
+    }
+
+  syslog(LOG_INFO, "[deskmate-wifi] connected ssid=%s ip=%s\n",
+         s_cur_ssid, s_cur_ip);
 
   (void)system("wapi save_config wlan0");
+  wifi_cred_save(try_ssid, try_pass);
 
   s_conn_busy = 0;
   s_conn_ok = 1;
@@ -487,6 +572,94 @@ int dm_wifi_connect(const char *ssid, const char *pass)
     }
   pthread_detach(th);
   return 0;
+}
+
+/* Boot auto-connect with retry until wlan0 appears.
+ * Manual scan/connect UI remains fully available. */
+static void *auto_thread(void *arg)
+{
+  char ssid[33];
+  char pass[64];
+  int round;
+
+  (void)arg;
+
+  ssid[0] = 0;
+  pass[0] = 0;
+  if (wifi_cred_load(ssid, sizeof(ssid), pass, sizeof(pass)) != 0 ||
+      !ssid[0])
+    {
+      snprintf(ssid, sizeof(ssid), "%s", DM_WIFI_AUTO_SSID);
+      snprintf(pass, sizeof(pass), "%s", DM_WIFI_AUTO_PSK);
+    }
+
+  syslog(LOG_INFO,
+         "[deskmate-wifi] auto-connect ssid=%s — wait wlan0 first\n", ssid);
+
+  for (round = 0; round < 8; round++)
+    {
+      /* Board bringup must finish first — do not call wapi before wlan0 */
+      if (ensure_driver_wait(300) < 0)
+        {
+          syslog(LOG_WARNING,
+                 "[deskmate-wifi] wlan0 not ready, round=%d "
+                 "(waiting for board SDIO probe)\n", round);
+          sleep(5);
+          continue;
+        }
+
+      if (dm_wifi_connected())
+        {
+          syslog(LOG_INFO, "[deskmate-wifi] already connected\n");
+          return NULL;
+        }
+
+      dm_wifi_clear_conn_flags();
+      if (dm_wifi_connect(ssid, pass) != 0)
+        {
+          syslog(LOG_WARNING, "[deskmate-wifi] connect start busy/fail\n");
+          sleep(5);
+          continue;
+        }
+
+      /* conn_thread: ifup→psk→essid→3s→renew×5 */
+      sleep(20);
+      if (dm_wifi_connected())
+        {
+          syslog(LOG_INFO, "[deskmate-wifi] auto connected ssid=%s ip=%s\n",
+                 dm_wifi_cur_ssid(), dm_wifi_cur_ip());
+          dm_wifi_clear_conn_flags();
+          return NULL;
+        }
+
+      syslog(LOG_WARNING, "[deskmate-wifi] auto connect not ready, retry\n");
+      dm_wifi_clear_conn_flags();
+      sleep(5);
+    }
+
+  syslog(LOG_ERR,
+         "[deskmate-wifi] auto-connect gave up; use manual UI after wlan0\n");
+  return NULL;
+}
+
+void dm_wifi_auto_start(void)
+{
+  pthread_t th;
+  pthread_attr_t attr;
+
+  if (s_auto_started)
+    {
+      return;
+    }
+  s_auto_started = 1;
+
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, DM_WIFI_STACK);
+  if (pthread_create(&th, &attr, auto_thread, NULL) == 0)
+    {
+      pthread_detach(th);
+    }
+  pthread_attr_destroy(&attr);
 }
 
 /* dm_wifi_tick lives in dm_ui_wifi.c */
