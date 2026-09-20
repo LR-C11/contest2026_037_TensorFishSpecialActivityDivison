@@ -1,5 +1,5 @@
 ﻿/****************************************************************************
- * dm_chat_ai.c 鈥?MiMo cloud chat + local offline fallback
+ * dm_chat_ai.c — MiMo cloud chat + local offline fallback
  ****************************************************************************/
 
 #include "deskmate.h"
@@ -23,14 +23,14 @@ static char s_last_reply[CHAT_MAX_REPLY];
 static char s_persona_ctx[512];
 
 static const char *const s_local_lines[] = {
-  "鎴戝湪鍛€傛兂鑱婁粈涔堬紝鎴栬€呰涓嶈鍏堜笓娉ㄤ竴浼氬効锛?,
-  "浠婂ぉ涔熻濂藉ソ鐓ч【鑷繁鍛€銆?,
-  "璁颁綇锛氬畬鎴愭瘮瀹岀編鏇撮噸瑕併€?,
-  "绱簡灏辨瓏涓€涓嬶紝鎴戦櫔浣犮€?,
-  "瑕佷笉瑕佸枬鍙ｆ按锛熻韩浣撴槸鏈挶銆?,
-  "浣犲凡缁忓緢妫掍簡锛岀户缁姞娌癸紒",
-  "闇€瑕佹垜甯綘璁扮偣浠€涔堝悧锛熷幓澶囧繕鐪嬬湅銆?,
-  "鐜?2048 鏀炬澗涓€涓嬩篃鍙互鍝︺€?,
+  "我在呢。想聊什么，或者要不要先专注一会儿？",
+  "今天也要好好照顾自己呀。",
+  "记住：完成比完美更重要。",
+  "累了就歇一下，我陪你。",
+  "要不要喝口水？身体是本钱。",
+  "你已经很棒了，继续加油！",
+  "需要我帮你记点什么吗？去备忘看看。",
+  "玩 2048 放松一下也可以哦。",
 };
 
 static const char *local_reply(const char *text)
@@ -40,46 +40,46 @@ static const char *local_reply(const char *text)
       return s_local_lines[0];
     }
 
-  if (strstr(text, "浣犲ソ") || strstr(text, "hi") || strstr(text, "hello") ||
-      strstr(text, "鍡?))
+  if (strstr(text, "你好") || strstr(text, "hi") || strstr(text, "hello") ||
+      strstr(text, "嗨"))
     {
-      return "浣犲ソ鍛€锛佹垜鏄?openvela灏忓姪鎵嬶紝妗岃竟鐨勫皬鎼。銆?;
+      return "你好呀！我是 openvela小助手，桌边的小搭档。";
     }
-  if (strstr(text, "浣犳槸璋?) || strstr(text, "浠嬬粛"))
+  if (strstr(text, "你是谁") || strstr(text, "介绍"))
     {
-      return "鎴戞槸 openvela灏忓姪鎵嬶細闄綘涓撴敞銆佽浜嬨€佽亰澶╃殑妗岄潰灏忎紮浼淬€?;
+      return "我是 openvela小助手：陪你专注、记事、聊天的桌面小伙伴。";
     }
-  if (strstr(text, "绗戣瘽") || strstr(text, "鏃犺亰"))
+  if (strstr(text, "笑话") || strstr(text, "无聊"))
     {
-      return "涓轰粈涔堢▼搴忓憳鎬诲垎涓嶆竻涓囧湥鑺傚拰鍦ｈ癁鑺傦紵鍥犱负 Oct 31 == Dec 25銆?;
+      return "为什么程序员总分不清万圣节和圣诞节？因为 Oct 31 == Dec 25。";
     }
-  if (strstr(text, "鍔犳补") || strstr(text, "榧撳姳") || strstr(text, "绱?))
+  if (strstr(text, "加油") || strstr(text, "鼓励") || strstr(text, "累"))
     {
-      return "娣卞懠鍚搞€備綘涓嶉渶瑕佷竴娆″仛瀹屾墍鏈変簨锛屽厛鍋氫笅涓€浠跺氨濂姐€?;
+      return "深呼吸。你不需要一次做完所有事，先做下一件就好。";
     }
-  if (strstr(text, "涓撴敞") || strstr(text, "宸ヤ綔") || strstr(text, "瀛︿範"))
+  if (strstr(text, "专注") || strstr(text, "工作") || strstr(text, "学习"))
     {
-      return "瑕佷笉鏉ヤ竴娈典笓娉紵1 鍒嗛挓涔熷彲浠ワ紝寮€濮嬩簡灏变笉绠楁櫄銆?;
+      return "要不来一段专注？1 分钟也可以，开始了就不算晚。";
     }
-  if (strstr(text, "澶╂皵"))
+  if (strstr(text, "天气"))
     {
-      return "鎴戣繖杈规殏鏃剁湅涓嶄簡澶╂皵锛屼笉杩囪寰楀嚭闂ㄧ湅涓€鐪煎ぉ绌哄憖銆?;
+      return "我这边暂时看不了天气，不过记得出门看一眼天空呀。";
     }
-  if (strstr(text, "鍠濇按"))
+  if (strstr(text, "喝水"))
     {
-      return "濂戒富鎰忥紝鐜板湪灏卞幓鍠濅竴鍙ｆ按鍚с€?;
+      return "好主意，现在就去喝一口水吧。";
     }
-  if (strstr(text, "鍚冭嵂") || strstr(text, "鑽?))
+  if (strstr(text, "吃药") || strstr(text, "药"))
     {
       {
-        const char *cur = dm_t("鍘汇€屽姛鑳?鈫?鍚冭嵂銆嶇湅鐪嬩粖澶╀换鍔°€?,
-                               "Check Features 鈫?Meds for today.");
+        const char *cur = dm_t("去「功能 → 吃药」看看今天任务。",
+                               "Check Features → Meds for today.");
         return cur;
       }
     }
-  if (strstr(text, "2048") || strstr(text, "娓告垙") || strstr(text, "鐜?))
+  if (strstr(text, "2048") || strstr(text, "游戏") || strstr(text, "玩"))
     {
-      return "鍔熻兘閲屾湁 2048锛屾粦涓€婊戝緢瑙ｅ帇銆傜帺瀹岃寰楀洖鏉ヤ笓娉ㄥ摝銆?;
+      return "功能里有 2048，滑一滑很解压。玩完记得回来专注哦。";
     }
 
   return s_local_lines[rand() % (int)(sizeof(s_local_lines) /
@@ -265,8 +265,8 @@ const char *dm_chat_ai_ask(const char *user_text)
                "\"temperature\":0.7,\"max_tokens\":200}",
                MIMO_MODEL,
                s_persona_ctx[0] ? s_persona_ctx
-                                 : "浣犳槸openvela灏忓姪鎵嬶紝妗岃竟闄即鍔╂墜锛屽洖绛旂畝娲佹俯鏆栵紝"
-                                   "涓嶈秴杩?0瀛楋紝鐢ㄤ腑鏂囥€?,
+                                 : "你是openvela小助手，桌边陪伴助手，回答简洁温暖，"
+                                   "不超过80字，用中文。",
                esc);
   if (n <= 0 || n >= (int)sizeof(body))
     {
