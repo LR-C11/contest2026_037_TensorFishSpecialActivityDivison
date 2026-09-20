@@ -25,6 +25,8 @@ typedef struct
 {
   uint32_t magic;
   int32_t learned;
+  int32_t today_learn;
+  int32_t today_key;
   int32_t wrong_n;
   int32_t daily_goal;
   int32_t bank_n;
@@ -143,6 +145,19 @@ static void recount(void)
       if (s_ws.known[i])
         {
           s_ws.learned++;
+          {
+            time_t tw = time(NULL);
+            struct tm tmw;
+            int key;
+            localtime_r(&tw, &tmw);
+            key = tmw.tm_yday + tmw.tm_year * 1000;
+            if (s_ws.today_key != key)
+              {
+                s_ws.today_key = key;
+                s_ws.today_learn = 0;
+              }
+            s_ws.today_learn++;
+          }
         }
       if (s_ws.wrong[i])
         {
@@ -872,6 +887,21 @@ static void cb_wset(lv_event_t *e)
       lv_label_set_text(s_day_l, b);
     }
   dm_show(PAGE_WORD_WSET);
+}
+
+
+int dm_word_today_n(void)
+{
+  time_t tw = time(NULL);
+  struct tm tmw;
+  int key;
+  localtime_r(&tw, &tmw);
+  key = tmw.tm_yday + tmw.tm_year * 1000;
+  if (s_ws.today_key != key)
+    {
+      return 0;
+    }
+  return s_ws.today_learn;
 }
 
 void dm_create_word(void)

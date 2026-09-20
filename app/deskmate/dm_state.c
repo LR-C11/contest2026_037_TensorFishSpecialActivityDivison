@@ -219,6 +219,11 @@ void dm_show(dm_page_t p)
       dm_dock_highlight(p);
     }
 
+  if (p == PAGE_HEALTH)
+    {
+      dm_health_refresh();
+    }
+
   if (p == PAGE_CHAT && g_dm_pages[PAGE_CHAT])
     {
       dm_face_attach(g_dm_pages[PAGE_CHAT], (DM_SCR_W - 76) / 2, 32);
@@ -260,6 +265,10 @@ void dm_show(dm_page_t p)
 
 void dm_tick(void)
 {
+  if (g_dm.page == PAGE_2048)
+    {
+      dm_health_add_game_ms(DM_TICK_MS);
+    }
   dm_face_tick();
   dm_focus_run_tick();
   dm_wifi_tick();

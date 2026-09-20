@@ -2,7 +2,7 @@
 
 ## 作品名称 / Work Name
 
-**Deskmate** — openvela 智能桌搭陪伴终端 / OpenVela desk companion terminal
+**心流桌伴** — openvela 智能桌搭陪伴终端 / OpenVela desk companion terminal
 
 **Version:** 0.13.2  
 **Track / 赛道:** AI 硬件产品创新 / AI Hardware Product Innovation  
@@ -14,10 +14,10 @@
 ## 一、作品简介 / Introduction
 
 **中文：**  
-Deskmate 针对桌搭产品“功能单一、缺少陪伴”的问题，基于 **Gemini-S1（全志 R528 / OpenVela）** 实现一款多功能桌面终端。本地集成专注计时、健康情绪综合分、备忘、吃药与喝水提醒、背单词、2048、MBTI 等能力；联网时接入小米 **MiMo** 大模型进行自然对话，助手自称 **openvela小助手**；断网时自动降级为本地回复。界面以 LVGL 单屏 + 底部五栏导航组织，吉祥物贯穿专注与聊天场景。
+心流桌伴针对桌搭产品“功能单一、缺少陪伴”的问题，基于 **Gemini-S1（全志 R528 / OpenVela）** 实现一款多功能桌面终端。本地集成专注计时、健康情绪综合分、备忘、吃药与喝水提醒、背单词、2048、MBTI 等能力；联网时接入小米 **MiMo** 大模型进行自然对话，助手自称 **openvela小助手**；断网时自动降级为本地回复。界面以 LVGL 单屏 + 底部五栏导航组织，吉祥物贯穿专注与聊天场景。
 
 **English:**  
-Deskmate is a multi-function desk companion on **Gemini-S1 (R528 / OpenVela)**. On-device features include focus timer, multi-factor mood score, notes, med/water reminders, word study, 2048, and MBTI. Online chat uses Xiaomi **MiMo** (assistant name: **openvela小助手**); offline falls back to local replies. UI is LVGL with a 5-tab dock and a shared mascot on Focus and Chat.
+心流桌伴 is a multi-function desk companion on **Gemini-S1 (R528 / OpenVela)**. On-device features include focus timer, multi-factor mood score, notes, med/water reminders, word study, 2048, and MBTI. Online chat uses Xiaomi **MiMo** (assistant name: **openvela小助手**); offline falls back to local replies. UI is LVGL with a 5-tab dock and a shared mascot on Focus and Chat.
 
 ---
 

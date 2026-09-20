@@ -596,6 +596,22 @@ static lv_obj_t *sen_card(lv_obj_t *p, const char *zh, const char *en, int y)
   return card;
 }
 
+
+int dm_sensor_last_th(float *t_c, float *h_pct)
+{
+  sen_init();
+  sen_try_copy();
+  if (t_c)
+    {
+      *t_c = s_sen_tv;
+    }
+  if (h_pct)
+    {
+      *h_pct = s_sen_hv;
+    }
+  return (s_sen_tok || s_sen_hok) ? 0 : -1;
+}
+
 void dm_create_sensors(void)
 {
   lv_obj_t *page = mk_tools_page(PAGE_SENSORS, "环境传感", "Sensors");
