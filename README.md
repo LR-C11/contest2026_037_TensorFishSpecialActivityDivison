@@ -1,4 +1,4 @@
-﻿# contest2026_037_TensorFishSpecialActivityDivison
+# 项目已经提交至openvela仓库 当前个人仓库代码并非最新  contest2026_037_TensorFishSpecialActivityDivison
 
 👋 欢迎参加 **2026 首届 openvela AI 硬件开发者大赛**！
 
