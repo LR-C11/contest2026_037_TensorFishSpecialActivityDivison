@@ -72,21 +72,25 @@ int deskmate_main(int argc, FAR char *argv[])
 
   dm_create_focus_home();
   dm_create_focus_run();
+  dm_create_focus_done();
   dm_create_chat();
   dm_create_health();
   dm_create_supervise();
-  dm_create_note();
   dm_create_features();
   dm_create_word();
   dm_create_tools();
   dm_create_life();
   dm_create_fun();
+  dm_create_mbti();
   dm_create_med();
-  dm_create_bt();
+  dm_create_note();
   dm_create_settings();
   dm_create_wifi();
   dm_create_dock();
   dm_show(PAGE_FOCUS_HOME);
+
+  /* Auto-connect home WiFi; manual WiFi page still works. */
+  dm_wifi_auto_start();
 
   lv_timer_create(tick_cb, DM_TICK_MS, NULL);
 
