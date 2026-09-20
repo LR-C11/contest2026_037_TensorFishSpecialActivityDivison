@@ -1,5 +1,8 @@
 /****************************************************************************
- * dm_ui_2048.c — 2048 game, clearer UI on 320×240
+ * dm_ui_2048.c — 2048 game (logic + layout fixed)
+ *
+ * Slide/merge uses the standard "consume pairs" algorithm (i += 2),
+ * unit-tested for 2222→44, 2220→42, 8844→16+8, direction transforms.
  ****************************************************************************/
 
 #include "deskmate.h"
@@ -11,13 +14,14 @@
 #ifdef CONFIG_DESKMATE_APP
 
 #define G2048_N 4
-#define TILE_PX 34
+#define TILE_PX 32
 #define TILE_GAP 4
 #define BOARD_PAD 6
 #define BOARD_IN (G2048_N * TILE_PX + (G2048_N - 1) * TILE_GAP)
 #define BOARD_W (BOARD_IN + BOARD_PAD * 2)
 #define BOARD_X ((DM_SCR_W - BOARD_W) / 2)
-#define BOARD_Y 46
+#define BOARD_Y 42
+#define BTN_Y 206
 #define BEST_PATH "/data/deskmate_2048_best.txt"
 
 static uint16_t s_bd[G2048_N][G2048_N];
@@ -63,15 +67,7 @@ static uint32_t tile_fg(int v)
 
 static const lv_font_t *tile_font(int v)
 {
-  if (v >= 1024)
-    {
-      return g_dm_font_s;
-    }
-  if (v >= 100)
-    {
-      return g_dm_font_m;
-    }
-  return g_dm_font_m;
+  return (v >= 1024) ? g_dm_font_s : g_dm_font_m;
 }
 
 static void load_best(void)
@@ -208,15 +204,16 @@ static bool can_move(void)
     {
       for (c = 0; c < G2048_N; c++)
         {
-          if (!s_bd[r][c])
+          uint16_t v = s_bd[r][c];
+          if (!v)
             {
               return true;
             }
-          if (c + 1 < G2048_N && s_bd[r][c] == s_bd[r][c + 1])
+          if (c + 1 < G2048_N && s_bd[r][c + 1] && v == s_bd[r][c + 1])
             {
               return true;
             }
-          if (r + 1 < G2048_N && s_bd[r][c] == s_bd[r + 1][c])
+          if (r + 1 < G2048_N && s_bd[r + 1][c] && v == s_bd[r + 1][c])
             {
               return true;
             }
@@ -225,50 +222,62 @@ static bool can_move(void)
   return false;
 }
 
+/* Standard 2048: compact toward index 0, merge each pair once (i += 2). */
 static int slide_line(int *line, int n)
 {
-  int tmp[8];
+  int src[8];
   int m = 0;
   int i;
+  int w = 0;
   int gain = 0;
 
   for (i = 0; i < n; i++)
     {
       if (line[i])
         {
-          tmp[m++] = line[i];
+          src[m++] = line[i];
         }
     }
-  for (i = 0; i < m - 1; i++)
+
+  for (i = 0; i < m; )
     {
-      if (tmp[i] == tmp[i + 1])
+      if (i + 1 < m && src[i] == src[i + 1])
         {
-          tmp[i] *= 2;
-          gain += tmp[i];
-          if (tmp[i] == 2048)
+          int v = src[i] * 2;
+          line[w++] = v;
+          gain += v;
+          if (v >= 2048)
             {
               s_won = true;
             }
-          memmove(&tmp[i + 1], &tmp[i + 2],
-                  sizeof(int) * (size_t)(m - i - 2));
-          m--;
+          i += 2; /* both tiles consumed — do not merge again */
+        }
+      else
+        {
+          line[w++] = src[i++];
         }
     }
-  for (i = 0; i < n; i++)
+
+  for (i = w; i < n; i++)
     {
-      line[i] = (i < m) ? tmp[i] : 0;
+      line[i] = 0;
     }
   return gain;
 }
 
+/* dir: 0 left, 1 right, 2 up, 3 down */
 static bool move_dir(int dir)
 {
   int line[8];
   int r;
   int c;
   int gain = 0;
-  bool moved = false;
   uint16_t before[G2048_N][G2048_N];
+
+  if (s_over)
+    {
+      return false;
+    }
 
   memcpy(before, s_bd, sizeof(s_bd));
 
@@ -289,7 +298,7 @@ static bool move_dir(int dir)
             }
         }
     }
-  else
+  else if (dir == 2 || dir == 3)
     {
       for (c = 0; c < G2048_N; c++)
         {
@@ -302,38 +311,38 @@ static bool move_dir(int dir)
           for (r = 0; r < G2048_N; r++)
             {
               int dst = (dir == 2) ? r : (G2048_N - 1 - r);
-              s_bd[dst][c] = (uint16_t)line[c];
+              s_bd[dst][c] = (uint16_t)line[r];
             }
         }
     }
-
-  if (memcmp(before, s_bd, sizeof(s_bd)) != 0)
+  else
     {
-      moved = true;
-      s_score += gain;
-      if (s_score > s_best)
-        {
-          s_best = s_score;
-          save_best();
-        }
-      spawn();
-      if (!can_move())
-        {
-          s_over = true;
-        }
+      return false;
     }
 
+  if (memcmp(before, s_bd, sizeof(s_bd)) == 0)
+    {
+      return false; /* no change → no spawn, no score */
+    }
+
+  s_score += gain;
+  if (s_score > s_best)
+    {
+      s_best = s_score;
+      save_best();
+    }
+  spawn();
+  if (!can_move())
+    {
+      s_over = true;
+    }
   paint_all();
-  return moved;
+  return true;
 }
 
 static void g2048_dir_cb(lv_event_t *e)
 {
-  int dir = (int)(intptr_t)lv_event_get_user_data(e);
-  if (!s_over)
-    {
-      move_dir(dir);
-    }
+  move_dir((int)(intptr_t)lv_event_get_user_data(e));
 }
 
 static void g2048_new_cb(lv_event_t *e)
@@ -381,7 +390,7 @@ static void board_event(lv_event_t *e)
 
   dx = now.x - start.x;
   dy = now.y - start.y;
-  if (abs(dx) < 22 && abs(dy) < 22)
+  if (abs(dx) < 20 && abs(dy) < 20)
     {
       return;
     }
@@ -416,16 +425,15 @@ void dm_create_2048(void)
   lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
   g_dm_pages[PAGE_2048] = page;
 
-  back = dm_btn(page, "←", "<", 36, 26, C_BTN, C_MUTED, g2048_back, NULL);
+  back = dm_btn(page, "←", "<", 36, 24, C_BTN, C_MUTED, g2048_back, NULL);
   lv_obj_set_pos(back, 8, 6);
 
   title = dm_lbl(page, "2048", "2048", g_dm_font_m, C_INK);
-  lv_obj_set_pos(title, 50, 8);
+  lv_obj_set_pos(title, 50, 6);
 
-  /* score cards */
   card = lv_obj_create(page);
-  lv_obj_set_size(card, 72, 36);
-  lv_obj_set_pos(card, 164, 4);
+  lv_obj_set_size(card, 70, 34);
+  lv_obj_set_pos(card, 166, 2);
   lv_obj_set_style_bg_color(card, lv_color_hex(0x141518), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_radius(card, 10, LV_PART_MAIN);
@@ -433,13 +441,13 @@ void dm_create_2048(void)
   lv_obj_set_style_pad_all(card, 4, LV_PART_MAIN);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   lab = dm_lbl(card, "分", "Score", g_dm_font_s, C_DIM);
-  lv_obj_set_pos(lab, 6, 2);
+  lv_obj_set_pos(lab, 6, 1);
   s_score_l = dm_lbl(card, "0", "0", g_dm_font_m, C_STAR);
-  lv_obj_set_pos(s_score_l, 6, 16);
+  lv_obj_set_pos(s_score_l, 6, 14);
 
   card = lv_obj_create(page);
-  lv_obj_set_size(card, 72, 36);
-  lv_obj_set_pos(card, 242, 4);
+  lv_obj_set_size(card, 70, 34);
+  lv_obj_set_pos(card, 242, 2);
   lv_obj_set_style_bg_color(card, lv_color_hex(0x141518), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_radius(card, 10, LV_PART_MAIN);
@@ -447,11 +455,11 @@ void dm_create_2048(void)
   lv_obj_set_style_pad_all(card, 4, LV_PART_MAIN);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   lab = dm_lbl(card, "最佳", "Best", g_dm_font_s, C_DIM);
-  lv_obj_set_pos(lab, 6, 2);
+  lv_obj_set_pos(lab, 6, 1);
   s_best_l = dm_lbl(card, "0", "0", g_dm_font_m, C_ACCENT);
-  lv_obj_set_pos(s_best_l, 6, 16);
+  lv_obj_set_pos(s_best_l, 6, 14);
 
-  /* board */
+  /* board: pad=0 on container; tiles use explicit inner padding */
   board = lv_obj_create(page);
   lv_obj_set_size(board, BOARD_W, BOARD_W);
   lv_obj_set_pos(board, BOARD_X, BOARD_Y);
@@ -459,16 +467,16 @@ void dm_create_2048(void)
   lv_obj_set_style_bg_opa(board, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_radius(board, 12, LV_PART_MAIN);
   lv_obj_set_style_border_width(board, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(board, BOARD_PAD, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(board, 0, LV_PART_MAIN);
   lv_obj_clear_flag(board, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(board, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(board, board_event, LV_EVENT_ALL, NULL);
+  lv_obj_add_event_cb(board, board_event, LV_EVENT_PRESSED, NULL);
+  lv_obj_add_event_cb(board, board_event, LV_EVENT_RELEASED, NULL);
 
   for (r = 0; r < G2048_N; r++)
     {
       for (c = 0; c < G2048_N; c++)
         {
-          /* tiles MUST be labels */
           lv_obj_t *t = lv_label_create(board);
           int x = BOARD_PAD + c * (TILE_PX + TILE_GAP);
           int y = BOARD_PAD + r * (TILE_PX + TILE_GAP);
@@ -481,6 +489,9 @@ void dm_create_2048(void)
           lv_obj_set_style_text_font(t, g_dm_font_m, LV_PART_MAIN);
           lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
           lv_obj_set_style_text_color(t, lv_color_hex(C_INK), LV_PART_MAIN);
+          /* nudge digits toward vertical center */
+          lv_obj_set_style_pad_top(t, 6, LV_PART_MAIN);
+          lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
           lv_label_set_text(t, "");
           s_tiles[r][c] = t;
         }
@@ -488,24 +499,23 @@ void dm_create_2048(void)
 
   s_status_l = dm_lbl(page, "滑动合并，或用方向键", "Swipe or arrow keys",
                       g_dm_font_s, C_DIM);
-  lv_obj_set_pos(s_status_l, 16, BOARD_Y + BOARD_W + 4);
+  lv_obj_align(s_status_l, LV_ALIGN_TOP_MID, 0, BOARD_Y + BOARD_W + 2);
 
-  /* controls — wider hit targets */
-  b = dm_btn(page, "←", "<", 48, 30, C_BTN, C_INK, g2048_dir_cb,
+  b = dm_btn(page, "←", "<", 46, 28, C_BTN, C_INK, g2048_dir_cb,
              (void *)(intptr_t)0);
-  lv_obj_set_pos(b, 28, 202);
-  b = dm_btn(page, "↑", "^", 48, 30, C_BTN, C_INK, g2048_dir_cb,
+  lv_obj_set_pos(b, 24, BTN_Y);
+  b = dm_btn(page, "↑", "^", 46, 28, C_BTN, C_INK, g2048_dir_cb,
              (void *)(intptr_t)2);
-  lv_obj_set_pos(b, 82, 202);
-  b = dm_btn(page, "↓", "v", 48, 30, C_BTN, C_INK, g2048_dir_cb,
+  lv_obj_set_pos(b, 76, BTN_Y);
+  b = dm_btn(page, "↓", "v", 46, 28, C_BTN, C_INK, g2048_dir_cb,
              (void *)(intptr_t)3);
-  lv_obj_set_pos(b, 136, 202);
-  b = dm_btn(page, "→", ">", 48, 30, C_BTN, C_INK, g2048_dir_cb,
+  lv_obj_set_pos(b, 128, BTN_Y);
+  b = dm_btn(page, "→", ">", 46, 28, C_BTN, C_INK, g2048_dir_cb,
              (void *)(intptr_t)1);
-  lv_obj_set_pos(b, 190, 202);
-  b = dm_btn(page, "新局", "New", 62, 30, C_STAR, C_EYE, g2048_new_cb,
+  lv_obj_set_pos(b, 180, BTN_Y);
+  b = dm_btn(page, "新局", "New", 60, 28, C_STAR, C_EYE, g2048_new_cb,
              NULL);
-  lv_obj_set_pos(b, 248, 202);
+  lv_obj_set_pos(b, 240, BTN_Y);
 
   load_best();
   g2048_new_cb(NULL);

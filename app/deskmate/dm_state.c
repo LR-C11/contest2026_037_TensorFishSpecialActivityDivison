@@ -221,10 +221,10 @@ void dm_show(dm_page_t p)
 
   if (p == PAGE_CHAT && g_dm_pages[PAGE_CHAT])
     {
-      dm_face_attach(g_dm_pages[PAGE_CHAT], (DM_SCR_W - 56) / 2, 28);
+      dm_face_attach(g_dm_pages[PAGE_CHAT], (DM_SCR_W - 76) / 2, 32);
       if (g_dm_face)
         {
-          lv_obj_set_size(g_dm_face, 56, 56);
+          lv_obj_set_size(g_dm_face, 76, 76);
         }
     }
   else if (p == PAGE_FOCUS_HOME && g_dm_pages[PAGE_FOCUS_HOME])
