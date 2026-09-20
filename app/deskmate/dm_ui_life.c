@@ -54,11 +54,35 @@ static int s_w_cups;
 static int s_w_interval = 45;
 static int s_w_left;
 static int s_w_day;
-static time_t s_w_due; /* absolute next reminder time */
+static time_t s_w_due;
+static bool s_w_alert_on;
 static lv_obj_t *s_w_big;
 static lv_obj_t *s_w_next;
 static lv_obj_t *s_w_tip;
-static lv_obj_t *s_w_chips[4];
+static lv_obj_t *s_w_iv_lab;
+static lv_obj_t *s_w_alert;
+
+#define WATER_IV_MIN 5
+#define WATER_IV_MAX 60
+#define WATER_IV_STEP 5
+
+static int water_iv_clamp(int iv)
+{
+  if (iv < WATER_IV_MIN)
+    {
+      iv = WATER_IV_MIN;
+    }
+  if (iv > WATER_IV_MAX)
+    {
+      iv = WATER_IV_MAX;
+    }
+  iv = (iv / WATER_IV_STEP) * WATER_IV_STEP;
+  if (iv < WATER_IV_MIN)
+    {
+      iv = WATER_IV_MIN;
+    }
+  return iv;
+}
 
 static int today_yday(void)
 {
@@ -71,7 +95,18 @@ static int today_yday(void)
 static void water_save(void)
 {
   FILE *f;
-  s_w_due = time(NULL) + s_w_left;
+
+  if (s_w_left > 0)
+    {
+      s_w_due = time(NULL) + s_w_left;
+    }
+  else if (!s_w_alert_on)
+    {
+      s_w_due = time(NULL) + s_w_interval * 60;
+      s_w_left = s_w_interval * 60;
+    }
+  /* when alert is on, keep due in the past until user taps 好滴 */
+
   f = fopen(WATER_PATH, "w");
   if (!f)
     {
@@ -100,28 +135,34 @@ static void water_load(void)
         }
       fclose(f);
     }
-  if (iv != 30 && iv != 45 && iv != 60 && iv != 90)
+  iv = water_iv_clamp(iv);
+  if (iv < WATER_IV_MIN || iv > WATER_IV_MAX)
     {
       iv = 45;
     }
+  s_w_cups = c < 0 ? 0 : c;
+  s_w_interval = iv;
+  s_w_day = today_yday();
+
   if (day != today_yday())
     {
-      c = 0;
-      due = (long)now + iv * 60;
+      s_w_cups = 0;
+      s_w_due = now + iv * 60;
     }
-  if (due <= (long)now)
+  else if (due <= 0)
     {
-      due = (long)now + iv * 60;
+      s_w_due = now + iv * 60;
     }
-  s_w_cups = c;
-  s_w_interval = iv;
-  s_w_due = (time_t)due;
+  else
+    {
+      s_w_due = (time_t)due;
+    }
+
   s_w_left = (int)(s_w_due - now);
   if (s_w_left < 0)
     {
-      s_w_left = 0;
+      s_w_left = 0; /* overdue → tick will raise full-screen alert */
     }
-  s_w_day = today_yday();
 }
 
 static void water_paint(void)
@@ -129,7 +170,6 @@ static void water_paint(void)
   char buf[32];
   int m;
   int s;
-  int i;
 
   if (s_w_big)
     {
@@ -140,41 +180,84 @@ static void water_paint(void)
   s = s_w_left % 60;
   if (s_w_next)
     {
-      snprintf(buf, sizeof(buf), "下次提醒 %02d:%02d", m, s);
+      if (s_w_alert_on || s_w_left <= 0)
+        {
+          snprintf(buf, sizeof(buf), "下次提醒 --:--");
+        }
+      else
+        {
+          snprintf(buf, sizeof(buf), "下次提醒 %02d:%02d", m, s);
+        }
       lv_label_set_text(s_w_next, buf);
     }
-  for (i = 0; i < 4; i++)
+  if (s_w_iv_lab)
     {
-      if (!s_w_chips[i])
-        {
-          continue;
-        }
-      lv_obj_set_style_bg_color(
-          s_w_chips[i],
-          lv_color_hex((i == 0 && s_w_interval == 30) ||
-                               (i == 1 && s_w_interval == 45) ||
-                               (i == 2 && s_w_interval == 60) ||
-                               (i == 3 && s_w_interval == 90)
-                           ? C_STAR
-                           : C_BTN),
-          LV_PART_MAIN);
-      lv_obj_set_style_text_color(
-          lv_obj_get_child(s_w_chips[i], 0),
-          lv_color_hex((i == 0 && s_w_interval == 30) ||
-                               (i == 1 && s_w_interval == 45) ||
-                               (i == 2 && s_w_interval == 60) ||
-                               (i == 3 && s_w_interval == 90)
-                           ? C_EYE
-                           : C_DIM),
-          LV_PART_MAIN);
+      snprintf(buf, sizeof(buf), "间隔 %d 分", s_w_interval);
+      lv_label_set_text(s_w_iv_lab, buf);
     }
 }
 
-static void water_chip_cb(lv_event_t *e)
+static void water_alert_hide_restart(void)
 {
-  int iv = (int)(intptr_t)lv_event_get_user_data(e);
+  if (s_w_alert)
+    {
+      lv_obj_add_flag(s_w_alert, LV_OBJ_FLAG_HIDDEN);
+    }
+  s_w_alert_on = false;
+  s_w_left = s_w_interval * 60;
+  s_w_due = time(NULL) + s_w_left;
+  water_save();
+  water_paint();
+}
+
+static void water_ok_cb(lv_event_t *e)
+{
+  (void)e;
+  water_alert_hide_restart();
+  if (s_w_tip)
+    {
+      lv_label_set_text(s_w_tip,
+                        dm_t("好滴，下次再提醒你", "OK, see you later"));
+    }
+  dm_show(g_dm.page);
+}
+
+static void water_alert_show(void)
+{
+  if (!s_w_alert || s_w_alert_on)
+    {
+      return;
+    }
+  s_w_alert_on = true;
+  s_w_left = 0;
+  lv_obj_clear_flag(s_w_alert, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(s_w_alert);
+  if (g_dm_dock)
+    {
+      lv_obj_add_flag(g_dm_dock, LV_OBJ_FLAG_HIDDEN);
+    }
+  if (s_w_tip)
+    {
+      lv_label_set_text(s_w_tip, dm_t("该喝水啦！", "Time to drink!"));
+    }
+  if (g_dm.page == PAGE_WATER)
+    {
+      water_paint();
+    }
+}
+
+static void water_iv_cb(lv_event_t *e)
+{
+  int delta = (int)(intptr_t)lv_event_get_user_data(e);
+  int iv = water_iv_clamp(s_w_interval + delta);
   s_w_interval = iv;
-  s_w_left = iv * 60;
+  water_alert_hide_restart();
+  if (s_w_tip)
+    {
+      char buf[24];
+      snprintf(buf, sizeof(buf), "间隔 %d 分", iv);
+      lv_label_set_text(s_w_tip, buf);
+    }
   water_save();
   water_paint();
 }
@@ -184,11 +267,19 @@ static void water_drink_cb(lv_event_t *e)
   (void)e;
   s_w_cups++;
   s_w_left = s_w_interval * 60;
+  s_w_due = time(NULL) + s_w_left;
+  if (s_w_alert)
+    {
+      lv_obj_add_flag(s_w_alert, LV_OBJ_FLAG_HIDDEN);
+    }
+  s_w_alert_on = false;
   if (s_w_tip)
     {
       lv_label_set_text(s_w_tip,
-                        s_w_cups >= WATER_GOAL ? "今日目标达成！"
-                                               : "记下了，记得休息眼睛");
+                        s_w_cups >= WATER_GOAL ? dm_t("今日目标达成！",
+                                                      "Goal done!")
+                                               : dm_t("记下了，记得休息眼睛",
+                                                      "Logged, rest your eyes"));
     }
   water_save();
   water_paint();
@@ -199,6 +290,12 @@ static void water_reset_cb(lv_event_t *e)
   (void)e;
   s_w_cups = 0;
   s_w_left = s_w_interval * 60;
+  s_w_due = time(NULL) + s_w_left;
+  if (s_w_alert)
+    {
+      lv_obj_add_flag(s_w_alert, LV_OBJ_FLAG_HIDDEN);
+    }
+  s_w_alert_on = false;
   if (s_w_tip)
     {
       lv_label_set_text(s_w_tip, " ");
@@ -211,36 +308,65 @@ void dm_create_water(void)
 {
   lv_obj_t *page = mk_life_page(PAGE_WATER, "喝水提醒", "Water");
   lv_obj_t *b;
-  static const char *zh_iv[4] = { "30分", "45分", "60分", "90分" };
-  int ivs[4] = { 30, 45, 60, 90 };
-  int i;
+  lv_obj_t *al;
+  lv_obj_t *t;
 
   s_w_big = dm_lbl(page, "0 / 8", "0 / 8", g_dm_font_xl, C_ACCENT);
   lv_obj_align(s_w_big, LV_ALIGN_TOP_MID, 0, 36);
 
   s_w_next = dm_lbl(page, "下次提醒 45:00", "Next 45:00", g_dm_font_s,
                     C_MUTED);
-  lv_obj_align(s_w_next, LV_ALIGN_TOP_MID, 0, 88);
+  lv_obj_align(s_w_next, LV_ALIGN_TOP_MID, 0, 84);
 
-  for (i = 0; i < 4; i++)
-    {
-      b = dm_btn(page, zh_iv[i], zh_iv[i], 68, 28, C_BTN, C_DIM,
-                 water_chip_cb, (void *)(intptr_t)ivs[i]);
-      lv_obj_set_pos(b, 8 + i * 76, 112);
-      s_w_chips[i] = b;
-    }
+  /* custom interval: 5~60 min, step 5 */
+  b = dm_btn(page, "−5", "-5", 64, 28, C_BTN, C_INK, water_iv_cb,
+             (void *)(intptr_t)-5);
+  lv_obj_set_pos(b, 40, 108);
+  s_w_iv_lab = dm_lbl(page, "间隔 45 分", "Every 45 min", g_dm_font_m,
+                      C_STAR);
+  lv_obj_set_style_text_align(s_w_iv_lab, LV_TEXT_ALIGN_CENTER,
+                              LV_PART_MAIN);
+  lv_obj_align(s_w_iv_lab, LV_ALIGN_TOP_MID, 0, 114);
+  b = dm_btn(page, "+5", "+5", 64, 28, C_BTN, C_INK, water_iv_cb,
+             (void *)(intptr_t)5);
+  lv_obj_set_pos(b, 216, 108);
 
   b = dm_btn(page, "喝了一杯", "Drink", 148, 36, 0x0d3a4a, C_ACCENT,
              water_drink_cb, NULL);
-  lv_obj_set_pos(b, 8, 156);
+  lv_obj_set_pos(b, 8, 150);
   b = dm_btn(page, "今日清零", "Reset", 148, 36, C_BTN, C_INK,
              water_reset_cb, NULL);
-  lv_obj_set_pos(b, 164, 156);
+  lv_obj_set_pos(b, 164, 150);
 
   s_w_tip = dm_lbl(page, " ", " ", g_dm_font_s, C_STAR);
-  lv_obj_align(s_w_tip, LV_ALIGN_TOP_MID, 0, 204);
+  lv_obj_align(s_w_tip, LV_ALIGN_TOP_MID, 0, 198);
+
+  /* full-screen reminder overlay (any page) */
+  al = lv_obj_create(g_dm_root);
+  lv_obj_set_size(al, DM_SCR_W, DM_SCR_H);
+  lv_obj_set_pos(al, 0, 0);
+  lv_obj_set_style_bg_color(al, lv_color_hex(0x062a3d), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(al, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(al, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(al, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(al, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(al, LV_OBJ_FLAG_HIDDEN);
+  s_w_alert = al;
+
+  t = dm_lbl(al, "喝水啦！", "Drink water!", g_dm_font_xl, C_ACCENT);
+  lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 78);
+
+  t = dm_lbl(al, "起来接杯水，活动一下", "Take a sip and stretch",
+             g_dm_font_s, C_STAR);
+  lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 130);
+
+  b = dm_btn(al, "好滴", "OK", 160, 40, C_STAR, C_EYE, water_ok_cb, NULL);
+  lv_obj_align(b, LV_ALIGN_TOP_MID, 0, 168);
 
   water_load();
+  s_w_alert_on = false;
   water_paint();
 }
 
@@ -262,15 +388,17 @@ void dm_water_tick(void)
     {
       left = 0;
     }
+
+  if (left <= 0 && !s_w_alert_on)
+    {
+      water_alert_show();
+    }
+
   if (left != s_w_left)
     {
       s_w_left = left;
       if (g_dm.page == PAGE_WATER)
         {
-          if (s_w_tip && s_w_left == 0)
-            {
-              lv_label_set_text(s_w_tip, "该喝水啦！");
-            }
           water_paint();
         }
     }
