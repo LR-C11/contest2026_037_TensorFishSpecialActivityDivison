@@ -213,12 +213,27 @@ static void water_alert_hide_restart(void)
 static void water_ok_cb(lv_event_t *e)
 {
   (void)e;
+  /* 好滴 = 已喝水，计 1 杯并重新倒计时 */
+  s_w_cups++;
   water_alert_hide_restart();
   if (s_w_tip)
     {
-      lv_label_set_text(s_w_tip,
-                        dm_t("好滴，下次再提醒你", "OK, see you later"));
+      if (s_w_cups >= WATER_GOAL)
+        {
+          lv_label_set_text(s_w_tip,
+                            dm_t("好滴，今日喝水达标！", "OK, daily goal done!"));
+        }
+      else
+        {
+          char buf[32];
+          snprintf(buf, sizeof(buf), "好滴，已记 %d/%d 杯",
+                   s_w_cups, WATER_GOAL);
+          lv_label_set_text(s_w_tip, buf);
+        }
     }
+  water_save();
+  water_paint();
+  dm_health_refresh();
   dm_show(g_dm.page);
 }
 
@@ -302,6 +317,11 @@ static void water_reset_cb(lv_event_t *e)
     }
   water_save();
   water_paint();
+}
+
+int dm_water_today_cups(void)
+{
+  return s_w_cups;
 }
 
 void dm_create_water(void)

@@ -12,7 +12,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.13.3"
+#define DM_VER "0.13.4"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -226,6 +226,11 @@ void dm_update_run_clock(void);
 
 /* health */
 void dm_health_add_focus_min(int32_t min);
+void dm_health_add_game_ms(int ms);
+int dm_water_today_cups(void);
+int dm_med_today_stats(int *sched_out, int *taken_out);
+int dm_word_today_n(void);
+int dm_sensor_last_th(float *t_c, float *h_pct);
 void dm_health_refresh(void);
 int dm_health_score(void);
 

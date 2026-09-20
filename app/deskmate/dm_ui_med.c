@@ -928,6 +928,51 @@ static void mk_kb_row(lv_obj_t *page, int y, const char *keys[], int n,
     }
 }
 
+
+int dm_med_today_stats(int *sched_out, int *taken_out)
+{
+  int i;
+  int sched = 0;
+  int taken = 0;
+  int today = med_today();
+
+  for (i = 0; i < s_med_n; i++)
+    {
+      int k;
+      int times = s_med[i].times;
+      if (times < 1)
+        {
+          continue;
+        }
+      if (times > 3)
+        {
+          times = 3;
+        }
+      /* only today's schedule counts as valid factor data */
+      if ((int)s_med[i].day != today)
+        {
+          continue;
+        }
+      sched += times;
+      for (k = 0; k < times; k++)
+        {
+          if (s_med[i].taken & (1u << k))
+            {
+              taken++;
+            }
+        }
+    }
+  if (sched_out)
+    {
+      *sched_out = sched;
+    }
+  if (taken_out)
+    {
+      *taken_out = taken;
+    }
+  return sched;
+}
+
 void dm_create_med(void)
 {
   lv_obj_t *page;
