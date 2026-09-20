@@ -1,148 +1,164 @@
 # contest2026_037_TensorFishSpecialActivityDivison
 
-👋 欢迎参加 **2026 首届 openvela AI 硬件开发者大赛**！
+## 作品名称 / Work Name
 
-这是组委会为你的队伍创建的**专属参赛仓库**（本仓为样例/模板，队伍编号 `037`；你看到的将是你自己的 `contest2026_<编号>_<队伍名>`）。比赛期间，你的全部参赛代码、打包产物与 AI Coding 日志都提交到这里。
+**Deskmate** — openvela 智能桌搭陪伴终端 / OpenVela desk companion terminal
 
-> 本仓既是「代码仓」，又内置了一键拉取整套 openvela 工程的 `repo` 清单（manifest）。你只需跟它打交道，**自始至终只动一个文件夹**。
-
----
-
-## 一、先读这些官方文档
-
-**通用（所有赛道必读）：**
-
-| 文档                                                                                                                                     | 用途                                           |
-| ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| [《大赛总览》](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/contest_overview.md)                        | 赛道、流程、评分、资源，建议先通读             |
-| [《参赛代码提交指南》](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/code_submission_guide.md)           | 仓库获取、提交流程、时间与权限（**以此为准**） |
-| [《AI Coding 日志归集与提交手册》](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/ai_coding_log_guide.md) | 如何导出 AI 对话日志并提交到 `logs/`           |
-
-**按你的赛道选读（三选一）：**
-
-| 赛道                  | 教程导航                                                                                                                                                 |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 快应用 / 手表应用创新 | [快应用教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/quickapp/quickapp_guide_index.md)                         |
-| AI 硬件产品创新       | [AI 硬件赛道教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/ai_hardware/ai_hardware_guide_index.md)              |
-| 新硬件适配            | [新硬件适配赛道教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/hardware_porting/hardware_porting_guide_index.md) |
+**Version:** 0.13.2  
+**Track / 赛道:** AI 硬件产品创新 / AI Hardware Product Innovation  
+**Team / 队伍:** TensorFishSpecialActivityDivison (037)  
+**Author / 作者:** LR-C11 · carsonlinrui@gmail.com
 
 ---
 
-## 二、第一步：拉取完整工程
+## 一、作品简介 / Introduction
 
-用组委会提供的命令一键拉取「openvela 全量源码 + 你的专属仓」：
+**中文：**  
+Deskmate 针对桌搭产品“功能单一、缺少陪伴”的问题，基于 **Gemini-S1（全志 R528 / OpenVela）** 实现一款多功能桌面终端。本地集成专注计时、健康情绪综合分、备忘、吃药与喝水提醒、背单词、2048、MBTI 等能力；联网时接入小米 **MiMo** 大模型进行自然对话，助手自称 **openvela小助手**；断网时自动降级为本地回复。界面以 LVGL 单屏 + 底部五栏导航组织，吉祥物贯穿专注与聊天场景。
 
-```bash
-repo init -u https://github.com/open-vela/contest2026_037_TensorFishSpecialActivityDivison \
-  -b dev-ai-contest-2026 -m contest2026_037_TensorFishSpecialActivityDivison.xml
-repo sync -c -j8
-```
-
-同步后，你的整个仓库位于工作区的 `contest2026_037_TensorFishSpecialActivityDivison/`，openvela 全量源码在外层（`nuttx/`、`apps/`、`packages/`、`vendor/` 等）。
+**English:**  
+Deskmate is a multi-function desk companion on **Gemini-S1 (R528 / OpenVela)**. On-device features include focus timer, multi-factor mood score, notes, med/water reminders, word study, 2048, and MBTI. Online chat uses Xiaomi **MiMo** (assistant name: **openvela小助手**); offline falls back to local replies. UI is LVGL with a 5-tab dock and a shared mascot on Focus and Chat.
 
 ---
 
-## 三、第二步：在哪里写代码
+## 二、功能一览 / Feature Overview
 
-**只在自己的仓目录 `contest2026_037_TensorFishSpecialActivityDivison/` 里开发。** 不同作品形态放在对应子目录，manifest 会通过 `<linkfile>` 把它们**软链**到 openvela 编译树该在的位置——你不用手动 copy：
+### 导航 / Dock
 
-| 作品形态 | 你的代码放这里             | 系统自动映射到                                 |
-| -------- | -------------------------- | ---------------------------------------------- |
-| 应用     | `app/hello_app/`           | `packages/demos/contest2026_037_hello_app`     |
-| 快应用   | `quickapp/hello_quickapp/` | `packages/apps/contest2026_037_hello_quickapp` |
-| 板级适配 | `board/contest_board/`     | `vendor/openvela/boards/contest2026_037_board` |
+专注 Focus · 聊天 Chat · 健康 Health · 功能 Features · 设定 Settings
 
-> 用不到的形态目录可以删掉；新增作品时按同样规则加子目录，并在 `contest2026_037_TensorFishSpecialActivityDivison.xml` 里补一条 `<linkfile>` 映射即可。**生产仓库（packages/nuttx/vendor 等）零改动。**
+### 详细功能 / Detailed Features
 
-建议仓库目录约定（便于评委定位）：
+#### 专注 Focus
+- 自选时长 Custom duration: 1 / 5 / 10 / 15 / 20 / 25… 分钟
+- 进行页 Running: 倒计时 + 吉祥物
+- 完成页 Done: 恭喜与表情
+- 暂停/结束 Pause/End
+- 滚动 MM:SS 时钟 Rolling clock
+- 完成时长计入健康统计 Feeds health stats
+
+#### 聊天 Chat
+- 居中吉祥物，可点击 Center tappable mascot
+- 表情下方显示回答 Answer under the face
+- 底部「按住说话」Hold-to-talk (bottom, above dock)
+- 云端 MiMo（OpenAI 兼容，mimo-v2.5-pro）
+- 离线本地人格回复 Offline persona replies
+- 自称 **openvela小助手**
+- 简化 UI：无输入框/发送/清空 No text box/send/clear
+
+#### 健康 Health
+- 情绪综合分（多因子本地计算）Multi-factor mood score
+- 心情记录 Mood log
+- 低分关怀建议 Care tips when score is low
+
+#### 功能页 Features（完整清单）
+
+**学习与效率 Study**
+| 中文 | English |
+|------|---------|
+| 备忘（列表/添加/拼音/持久化） | Notes (list/add/pinyin/persist) |
+| 背单词 1000+（学/练/测/错题） | Word Memo 1000+ (study/quiz/wrong) |
+| 计算器 | Calculator |
+| 倒数日 | Countdown |
+| 监督 | Supervise |
+
+**生活健康 Life & Health**
+| 中文 | English |
+|------|---------|
+| 吃药提醒（键盘，每天 1/2/3 次） | Med reminders (keyboard, 1–3×/day) |
+| 喝水提醒打卡 | Water check-in |
+| 吃什么随机 | What to eat |
+| BMI 计算 | BMI |
+| 环境传感（温湿度/光照） | Sensors (temp/humi/light) |
+
+**游戏与测试 Games & Tests**
+| 中文 | English |
+|------|---------|
+| 2048（滑动合并、最佳分、标准算法） | 2048 (swipe merge, best score, standard algorithm) |
+| 猜数字 1–100 | Guess number |
+| 24 点 | Make 24 |
+| 画板涂鸦 | Doodle |
+| MBTI：4 套 × 52 题，四选一 2×2，随机抽套，四维百分比 | MBTI: 4 banks × 52, 4-choice 2×2, random bank, % per dimension |
+
+**设定 Settings**
+| 中文 | English |
+|------|---------|
+| WiFi 扫描 / 手动连接 / 自动连接 / 状态 | Scan / manual / auto connect / status |
+
+#### 吉祥物 Mascot
+- 几何白色小脸，眨眼 Geometric blinking face
+- 多表情 Multiple expressions
+- 专注页与聊天页共用 Shared on Focus & Chat
+
+#### 自定义 Skill
+- 名称 `desk-companion`
+- 路径 `/data/agent/skills/desk-companion/SKILL.md`
+- 场景：陪伴对话、结合专注/吃药/喝水给建议
+- Scene: companionship + status-aware hints; offline-safe
+
+---
+
+## 三、技术要点 / Technical Highlights
+
+| 项 Item | 说明 Description |
+|---------|------------------|
+| 图形 Graphics | LVGL on OpenVela/NuttX；SPI LCD 320×240 + 触摸 |
+| AI | MiMo HTTPS Chat Completions；离线关键词人格 |
+| 开发板 Board | Gemini-S1 only（R528，128MB） |
+| 无线 Wireless | RTL8733 SDIO；自动/手动 WiFi；驱动 bringup 增强 |
+| 降级 Degradation | 无网功能全开；聊天自动本地回复 |
+
+MiMo 接口 / Endpoint:
 
 ```text
-app/ | quickapp/ | board/   # 你的作品代码
-logs/                       # AI Coding 日志（主动导出后提交，格式见 logs/README.md）
-README.md                   # 作品说明（提交前请改成你自己的，见第六节）
+https://token-plan-sgp.xiaomimimo.com/v1
+Model: mimo-v2.5-pro
+Auth: Authorization: Bearer <API_KEY>
 ```
-
-> 仓内附带了一个 `.gitignore.example`，给出了**编译产物**等不需要进仓的文件示例。如需启用，`cp .gitignore.example .gitignore` 后按需增删即可。**注意 `logs/` 下最终导出的 AI Coding 日志必须提交，不要忽略。**
->
-> `logs/` 的目录结构与提交格式见 [logs/README.md](logs/README.md)。
 
 ---
 
-## 四、第三步：编译与运行
+## 四、目录结构 / Repository Layout
 
-编译/运行步骤随作品形态不同而不同，请参考你所在赛道的教程导航：
+```text
+app/deskmate/     # Deskmate 应用源码 / application source
+logs/             # AI Coding 日志 / AI coding session logs
+board/            # 板级相关（如有）/ board material (if any)
+```
 
-- 快应用 / 手表应用：[快应用教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/quickapp/quickapp_guide_index.md)（含模拟器与开发板部署）。
-- AI 硬件产品创新：[AI 硬件赛道教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/ai_hardware/ai_hardware_guide_index.md)（环境搭建、编译烧录、Skill 开发）。
-- 新硬件适配：[新硬件适配赛道教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/hardware_porting/hardware_porting_guide_index.md)（BSP 移植、最小 NSH 基线）。
+应用详细说明见：[`app/deskmate/README.md`](app/deskmate/README.md)（中英双语完整功能列表）。
 
-子目录已通过 manifest 中的 `<linkfile>` 软链进 openvela 编译树，因此构建在 openvela 工作区**根目录**（即你这个仓的上一级）进行。openvela 使用 `build.sh` 作为统一入口，接收一个 **board config 路径**作为参数：
+---
+
+## 五、运行方式 / How to Run
 
 ```bash
-# 进入 openvela 工作区根目录（你的仓的上一级）
-cd ..
+cd <openvela-root>
+./build.sh vendor/allwinnertech/boards/r528/r528s3-gemini-s1/configs/nsh_minidisplay/ -j8
+strings nuttx/vela.bin | grep Deskmate   # Deskmate 0.13.2
 
-# 通用语法：第一个参数是 board config 路径，第二个参数可以是 menuconfig / distclean 等
-./build.sh <board-config-path> [menuconfig|distclean] [-j8]
+cp -f nuttx/vela.bin \
+  vendor/allwinnertech/lichee/board/r528s3/gemini-s1_nand/configs/nsh.fex
+cd vendor/allwinnertech/lichee
+source envsetup.sh && lunch_nuttx   # 2 → r528s3-gemini-s1
+pack
 ```
 
-> 具体的 board config 路径、目标产物、模拟器/真机部署方式请以你所在赛道的教程导航为准。本仓 `app/` `quickapp/` `board/` 三个示例骨架对应的 Kconfig 选项可通过 `menuconfig` 启用。
+镜像 / Image: `out/r528s3/gemini-s1_nand/rtos_nuttx_r528s3-gemini-s1_uart0_128Mnand.img`  
+烧录 / Flash: PhoenixSuit。
 
 ---
 
-## 五、第四步：提交作品
+## 六、AI Coding 说明 / AI Coding
 
-1. **fork** 你的专属仓 → 开发 → `git commit` 并推送 → 向专属仓发起 **Pull Request**，可**自行 review 并合入**（无需等组委会）。
-2. **AI Coding 日志**：与 AI 工具的对话会自动记录到本机 staging（不会自动上传），需你**主动导出/打包**选定会话到仓内 `logs/` 目录后一并提交。详见[《AI Coding 日志归集与提交手册》](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/ai_coding_log_guide.md)。
-3. 若需改动 **nuttx 等公共仓库**，不在本仓改，而是 fork 对应公共仓、以 PR 提交到 `dev-ai-contest-2026` 分支，由组委会 review 后合入。
+本作品使用 AI 辅助进行方案拆解、LVGL 界面与 2048/MBTI 逻辑实现、WiFi 驱动排查与文档整理。对话日志见 `logs/` 目录。
 
-> ⏰ **提交作品截止：9 月 20 日**。截止后统一收回 push 权限，仍可查看 / clone。
->
-> 获奖后再按要求将作品 PR 至 openvela 上游对应仓库（走标准 PR + CI 流程）。
-
-### 关于 PR 与 CLA
-
-- 本仓所有改动通过 **Pull Request** 合入（分支保护强制，可自行合入自己的 PR）。
-- 首次贡献需在[**官网签署 CLA**](https://openvela.com/#/community/cla)；PR 上会自动跑 `cla/signature` 检查，在官网签署成功后，在 PR 评论 `/check-cla` 复检即可通过。
+AI assisted architecture, LVGL UI, 2048/MBTI logic, WiFi bringup, and docs. Session logs are under `logs/`.
 
 ---
 
-## 六、提交前：把本 README 改成你的作品说明
+## 七、选题方向 / Direction
 
-本文件目前是组委会给的**使用说明书**。**作品提交前，请把它替换成你自己作品的说明**，方便评委快速了解你做了什么、怎么跑起来。建议至少包含以下内容：
+**AI 硬件产品创新** — 以健康干预与情感陪伴为核心，将碎片化桌搭需求整合为可离线使用的桌面终端，并接入大赛 MiMo 云能力。
 
-```markdown
-# <你的作品名>
-
-## 一、作品简介
-<一句话/一段话说明这个作品是什么、解决什么问题、亮点在哪>
-
-## 二、选题方向
-<快应用 / 手表应用创新 ｜ AI 硬件产品创新 ｜ 新硬件适配 ｜ 自定方向，并简述理由>
-
-## 三、目录结构
-<列出你这个仓里各目录/文件的作用，例如：>
-- `app/xxx/`        — <说明>
-- `board/xxx/`      — <说明>
-- `quickapp/xxx/`   — <说明>
-- `logs/`           — AI Coding 日志
-- `docs/` 或其他    — <说明>
-
-## 四、运行方式
-<拉取工程后，如何编译、烧录/部署、运行的完整步骤；最好能让评委照着一步步复现>
-
-## 五、AI Coding 使用说明
-<说明本作品如何借助 AI 辅助开发：
-- 在需求拆解 / 方案设计 / 编码 / 调试 / 文档等环节如何与 AI 协作；
-- AI 对开发效率或质量带来的实际帮助。
-完整对话日志见 logs/ 目录>
-```
-
-> 提示：将会根据「作品本身 + 你的 README 说明 + `logs/` 里的 AI Coding 日志」来理解和评估你的作品，README 写清楚很重要。
-
----
-
-## 附：仓库命名规范
-
-`contest2026_<编号>_<队伍名>` — 编号三位零填充；队名 slug（全小写、英文/拼音、连字符）。例：`contest2026_037_TensorFishSpecialActivityDivison`。
-（仓库由组委会统一创建，**每队仅一个仓**，无需自行命名。）
+**AI Hardware Innovation** — Health-oriented, offline-first desk companion integrated with contest MiMo cloud services.
