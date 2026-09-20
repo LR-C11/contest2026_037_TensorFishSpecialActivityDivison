@@ -43,11 +43,11 @@ static const char *local_reply(const char *text)
   if (strstr(text, "浣犲ソ") || strstr(text, "hi") || strstr(text, "hello") ||
       strstr(text, "鍡?))
     {
-      return "浣犲ソ鍛€锛佹垜鏄?Deskmate锛屾杈圭殑灏忔惌妗ｃ€?;
+      return "浣犲ソ鍛€锛佹垜鏄?openvela灏忓姪鎵嬶紝妗岃竟鐨勫皬鎼。銆?;
     }
   if (strstr(text, "浣犳槸璋?) || strstr(text, "浠嬬粛"))
     {
-      return "鎴戞槸 Deskmate锛氶櫔浣犱笓娉ㄣ€佽浜嬨€佽亰澶╃殑妗岄潰灏忎紮浼淬€?;
+      return "鎴戞槸 openvela灏忓姪鎵嬶細闄綘涓撴敞銆佽浜嬨€佽亰澶╃殑妗岄潰灏忎紮浼淬€?;
     }
   if (strstr(text, "绗戣瘽") || strstr(text, "鏃犺亰"))
     {
@@ -265,7 +265,7 @@ const char *dm_chat_ai_ask(const char *user_text)
                "\"temperature\":0.7,\"max_tokens\":200}",
                MIMO_MODEL,
                s_persona_ctx[0] ? s_persona_ctx
-                                 : "浣犳槸Deskmate锛屾杈归櫔浼村皬鍔╂墜锛屽洖绛旂畝娲佹俯鏆栵紝"
+                                 : "浣犳槸openvela灏忓姪鎵嬶紝妗岃竟闄即鍔╂墜锛屽洖绛旂畝娲佹俯鏆栵紝"
                                    "涓嶈秴杩?0瀛楋紝鐢ㄤ腑鏂囥€?,
                esc);
   if (n <= 0 || n >= (int)sizeof(body))
