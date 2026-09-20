@@ -12,7 +12,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.5.1"
+#define DM_VER "0.13.4"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -37,12 +37,15 @@
 typedef enum {
   PAGE_FOCUS_HOME = 0,
   PAGE_FOCUS_RUN,
+  PAGE_FOCUS_DONE,
   PAGE_CHAT,
   PAGE_HEALTH,
   PAGE_MOOD_LOG,
   PAGE_FEATURES,
   PAGE_SUPERVISE,
   PAGE_NOTE,
+  PAGE_NOTE_ADD,
+  PAGE_NOTE_KB,
   PAGE_SETTINGS,
   PAGE_WIFI,
   PAGE_WIFI_PW,
@@ -56,6 +59,23 @@ typedef enum {
   PAGE_WORD_WRONG,
   PAGE_WORD_LIST,
   PAGE_WORD_WSET,
+  PAGE_CALC,
+  PAGE_SENSORS,
+  PAGE_GUESS,
+  PAGE_CONVERT,
+  PAGE_WATER,
+  PAGE_COUNTDOWN,
+  PAGE_EAT,
+  PAGE_24,
+  PAGE_DRAW,
+  PAGE_BMI,
+  PAGE_MED,
+  PAGE_MED_ADD,
+  PAGE_MED_KB,
+  PAGE_2048,
+  PAGE_MBTI,
+  PAGE_MBTI_Q,
+  PAGE_MBTI_RESULT,
   PAGE_COUNT
 } dm_page_t;
 
@@ -178,14 +198,23 @@ void dm_face_attach(lv_obj_t *page, int x, int y);
 void dm_face_set(dm_face_t f, dm_eye_decor_t decor, int decor_hold);
 void dm_face_tick(void);
 void dm_face_on_click(lv_event_t *e);
+void dm_face_repaint(void);
+void dm_word_face_click(void);
 
 /* pages */
 void dm_create_focus_home(void);
 void dm_create_focus_run(void);
+void dm_create_focus_done(void);
+void dm_focus_show_done(int32_t minutes);
 void dm_create_chat(void);
 void dm_create_health(void);
+void dm_create_2048(void);
+void dm_create_mbti(void);
+void dm_chat_tick(void);
+int dm_chat_ai_available(void);
+const char *dm_chat_ai_ask(const char *user_text);
+const char *dm_chat_local_reply(const char *user_text);
 void dm_create_supervise(void);
-void dm_create_note(void);
 void dm_create_dock(void);
 void dm_dock_highlight(dm_page_t p);
 void dm_focus_home_tick(void);
@@ -197,6 +226,11 @@ void dm_update_run_clock(void);
 
 /* health */
 void dm_health_add_focus_min(int32_t min);
+void dm_health_add_game_ms(int ms);
+int dm_water_today_cups(void);
+int dm_med_today_stats(int *sched_out, int *taken_out);
+int dm_word_today_n(void);
+int dm_sensor_last_th(float *t_c, float *h_pct);
 void dm_health_refresh(void);
 int dm_health_score(void);
 
@@ -205,9 +239,20 @@ void dm_create_settings(void);
 void dm_create_features(void);
 void dm_create_wifi(void);
 void dm_create_word(void);
+void dm_create_tools(void);
+void dm_create_life(void);
+void dm_create_fun(void);
+void dm_create_med(void);
+void dm_create_note(void);
+void dm_med_kb_open(void);
+void dm_tools_tick(void);
+void dm_life_tick(void);
+void dm_fun_tick(void);
+void dm_med_tick(void);
 void dm_wifi_tick(void);
 int dm_wifi_start_scan(void);
 int dm_wifi_connect(const char *ssid, const char *pass);
+void dm_wifi_auto_start(void);
 const char *dm_wifi_cur_ssid(void);
 const char *dm_wifi_cur_ip(void);
 int dm_wifi_connected(void);

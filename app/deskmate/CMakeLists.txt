@@ -17,5 +17,15 @@ if(CONFIG_DESKMATE_APP)
       dm_wifi.c
       dm_ui_word.c
       dm_word_bank.c
+      dm_ui_tools.c
+      dm_ui_life.c
+      dm_ui_fun.c
+      dm_ui_med.c
+      dm_ui_note.c
+      dm_pinyin.c
+      dm_ui_2048.c
+      dm_ui_chat.c
+      dm_chat_ai.c
+      dm_ui_mbti.c
     INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR})
 endif()

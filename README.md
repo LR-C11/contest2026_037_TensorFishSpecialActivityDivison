@@ -1,4 +1,4 @@
-# contest2026_037_TensorFishSpecialActivityDivison
+﻿# contest2026_037_TensorFishSpecialActivityDivison
 
 👋 欢迎参加 **2026 首届 openvela AI 硬件开发者大赛**！
 

@@ -1,4 +1,4 @@
-# Deskmate — Gemini-S1 桌搭伴侣
+﻿# 蹇冩祦妗屼即 — Gemini-S1 桌搭伴侣
 
 **Version:** 0.4.9  
 **Board path:** `vendor/allwinnertech/apps/deskmate/`

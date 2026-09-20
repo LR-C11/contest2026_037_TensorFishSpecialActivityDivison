@@ -21,7 +21,45 @@ static lv_obj_t *s_start_btn;
 static dm_clock_t s_clock;
 static bool s_clock_ready;
 
+static lv_obj_t *s_done_sub;
+static lv_obj_t *s_done_min;
+
 static const int32_t s_presets[4] = { 15, 25, 45, 60 };
+
+/* Custom duration sequence: 1, 5, 10, 15, 20, 25 ... 120 */
+static int32_t focus_custom_next(int32_t v)
+{
+  if (v < 1)
+    {
+      return 1;
+    }
+  if (v == 1)
+    {
+      return 5;
+    }
+  if (v >= 120)
+    {
+      return 120;
+    }
+  return v + 5;
+}
+
+static int32_t focus_custom_prev(int32_t v)
+{
+  if (v <= 1)
+    {
+      return 1;
+    }
+  if (v == 5)
+    {
+      return 1;
+    }
+  if (v > 120)
+    {
+      return 120;
+    }
+  return v - 5;
+}
 
 static void paint_home_status(void)
 {
@@ -101,7 +139,6 @@ static void preset_cb(lv_event_t *e)
         }
       mark_preset(idx);
       apply_minutes(s_presets[idx]);
-      g_dm.focus_custom_min = g_dm.focus_sel_min;
     }
   else
     {
@@ -122,10 +159,19 @@ static void preset_cb(lv_event_t *e)
 static void step_cb(lv_event_t *e)
 {
   int delta = (int)(uintptr_t)lv_event_get_user_data(e);
-  g_dm.focus_custom_min += delta * 5;
-  if (g_dm.focus_custom_min < 5)
+
+  if (delta > 0)
     {
-      g_dm.focus_custom_min = 5;
+      g_dm.focus_custom_min = focus_custom_next(g_dm.focus_custom_min);
+    }
+  else
+    {
+      g_dm.focus_custom_min = focus_custom_prev(g_dm.focus_custom_min);
+    }
+
+  if (g_dm.focus_custom_min < 1)
+    {
+      g_dm.focus_custom_min = 1;
     }
   if (g_dm.focus_custom_min > 120)
     {
@@ -188,6 +234,43 @@ void dm_focus_start(void)
   dm_show(PAGE_FOCUS_RUN);
 }
 
+void dm_focus_show_done(int32_t minutes)
+{
+  static const char *zh[] = {
+    "太棒了，这一段你很专注",
+    "完成得很漂亮，休息一下",
+    "坚持下来了，为你开心",
+  };
+  static const char *en[] = {
+    "Great focus — you stayed with it",
+    "Nicely done. Take a breather.",
+    "You stuck with it. Proud of you.",
+  };
+  static int n;
+  char b[32];
+
+  if (s_done_min)
+    {
+      lv_snprintf(b, sizeof(b), "%ld", (long)minutes);
+      lv_label_set_text(s_done_min, b);
+    }
+  if (s_done_sub)
+    {
+      lv_label_set_text(s_done_sub, dm_t(zh[n % 3], en[n % 3]));
+    }
+  n++;
+
+  dm_face_attach(g_dm_pages[PAGE_FOCUS_DONE], (DM_SCR_W - 64) / 2, 22);
+  if (g_dm_face)
+    {
+      lv_obj_set_size(g_dm_face, 64, 64);
+    }
+  dm_face_set(FACE_DONE, EYE_DECOR_HEART, 30);
+  g_dm.focus_finished = true;
+  g_dm.focus_run = false;
+  dm_show(PAGE_FOCUS_DONE);
+}
+
 void dm_focus_end(void)
 {
   int32_t done = (g_dm.focus_total - g_dm.focus_left) / 60;
@@ -215,9 +298,8 @@ void dm_focus_end(void)
 
 void dm_focus_toggle_pause(void)
 {
-  if (g_dm.focus_finished)
+  if (g_dm.page == PAGE_FOCUS_DONE || g_dm.focus_finished)
     {
-      /* restart same duration */
       apply_minutes(g_dm.focus_sel_min);
       dm_focus_start();
       return;
@@ -350,7 +432,7 @@ void dm_create_focus_home(void)
   minus = dm_btn(s_step_box, "-", "-", 32, 32, C_BTN_HI, C_INK, step_cb,
                  (void *)(uintptr_t)-1);
   lv_obj_set_pos(minus, 0, 1);
-  s_step_val = dm_lbl(s_step_box, "30", "30", g_dm_font_m, C_INK);
+  s_step_val = dm_lbl(s_step_box, "1", "1", g_dm_font_m, C_INK);
   lv_obj_align(s_step_val, LV_ALIGN_CENTER, 0, 0);
   plus = dm_btn(s_step_box, "+", "+", 32, 32, C_BTN_HI, C_INK, step_cb,
                 (void *)(uintptr_t)1);
@@ -362,6 +444,7 @@ void dm_create_focus_home(void)
 
   mark_preset(1);
   apply_minutes(25);
+  g_dm.focus_custom_min = 1;
 }
 
 void dm_create_focus_run(void)
@@ -431,29 +514,124 @@ void dm_focus_run_tick(void)
 
   if (g_dm.focus_left == 0)
     {
+      int32_t mins = g_dm.focus_total / 60;
+
       g_dm.focus_run = false;
       g_dm.focus_finished = true;
-      dm_health_add_focus_min(g_dm.focus_total / 60);
+      dm_health_add_focus_min(mins);
       dm_health_refresh();
-      dm_face_set(FACE_DONE, EYE_DECOR_HEART, 20);
-      if (g_dm.page == PAGE_FOCUS_RUN)
+      dm_face_set(FACE_DONE, EYE_DECOR_HEART, 30);
+      if (s_run_status)
         {
-          dm_say("专注完成，做得很好", "Done. Well done!");
-          if (s_run_status)
-            {
-              lv_label_set_text(s_run_status, dm_t("完成", "Complete"));
-            }
-          if (s_run_pause_lbl)
-            {
-              lv_label_set_text(s_run_pause_lbl, dm_t("再来一段", "Again"));
-            }
+          lv_label_set_text(s_run_status, dm_t("完成", "Complete"));
         }
+      if (s_run_pause_lbl)
+        {
+          lv_label_set_text(s_run_pause_lbl, dm_t("再来一段", "Again"));
+        }
+      dm_say("专注完成，做得很好", "Done. Well done!");
+      dm_focus_show_done(mins);
     }
   else if (g_dm.focus_left == 60 && g_dm.page == PAGE_FOCUS_RUN)
     {
       dm_face_set(FACE_FOCUS, EYE_DECOR_STAR, 6);
       dm_say("还有一分钟", "One minute left");
     }
+}
+
+static void done_home_cb(lv_event_t *e)
+{
+  (void)e;
+  g_dm.focus_run = false;
+  g_dm.focus_finished = false;
+  g_dm.focus_left = g_dm.focus_total;
+  dm_face_attach(g_dm_pages[PAGE_FOCUS_HOME], (DM_SCR_W - 68) / 2, 24);
+  if (g_dm_face)
+    {
+      lv_obj_set_size(g_dm_face, 68, 68);
+    }
+  dm_face_set(FACE_IDLE, EYE_DECOR_NONE, 0);
+  g_dm_bubble = s_home_bubble;
+  dm_say("选一个时长，随时再开始", "Pick a time when you're ready");
+  dm_show(PAGE_FOCUS_HOME);
+  paint_home_status();
+}
+
+static void done_again_cb(lv_event_t *e)
+{
+  (void)e;
+  apply_minutes(g_dm.focus_sel_min);
+  dm_focus_start();
+}
+
+void dm_create_focus_done(void)
+{
+  lv_obj_t *page = mk_page(g_dm_root, PAGE_FOCUS_DONE);
+  lv_obj_t *title;
+  lv_obj_t *unit;
+  lv_obj_t *homeb;
+  lv_obj_t *againb;
+  lv_obj_t *st;
+  lv_obj_t *ht;
+  int i;
+  static const int star_xy[4][2] = {
+    { 42, 28 }, { 64, 18 }, { 250, 24 }, { 236, 48 },
+  };
+  static const int heart_xy[2][2] = {
+    { 70, 58 }, { 240, 52 },
+  };
+
+  title = dm_lbl(page, "专注完成！", "Focus complete!", g_dm_font_m, C_INK);
+  lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_width(title, 300);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 92);
+
+  s_done_sub = dm_lbl(page, "太棒了，这一段你很专注", "Great focus!",
+                      g_dm_font_s, C_STAR);
+  lv_obj_set_style_text_align(s_done_sub, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_width(s_done_sub, 300);
+  lv_obj_align(s_done_sub, LV_ALIGN_TOP_MID, 0, 112);
+
+  s_done_min = dm_lbl(page, "25", "25", g_dm_font_xl, C_ACCENT);
+  lv_obj_set_style_text_align(s_done_min, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_width(s_done_min, 200);
+  lv_obj_align(s_done_min, LV_ALIGN_TOP_MID, -20, 128);
+
+  unit = dm_lbl(page, "分钟", "min", g_dm_font_s, C_MUTED);
+  lv_obj_align(unit, LV_ALIGN_TOP_MID, 48, 148);
+
+  for (i = 0; i < 4; i++)
+    {
+      st = lv_obj_create(page);
+      lv_obj_set_size(st, 8, 8);
+      lv_obj_set_pos(st, star_xy[i][0], star_xy[i][1]);
+      lv_obj_set_style_bg_color(st, lv_color_hex(C_STAR), LV_PART_MAIN);
+      lv_obj_set_style_bg_opa(st, LV_OPA_COVER, LV_PART_MAIN);
+      lv_obj_set_style_radius(st, 2, LV_PART_MAIN);
+      lv_obj_set_style_border_width(st, 0, LV_PART_MAIN);
+      lv_obj_clear_flag(st, LV_OBJ_FLAG_SCROLLABLE);
+    }
+
+  for (i = 0; i < 2; i++)
+    {
+      ht = lv_obj_create(page);
+      lv_obj_set_size(ht, 10, 10);
+      lv_obj_set_pos(ht, heart_xy[i][0], heart_xy[i][1]);
+      lv_obj_set_style_bg_color(ht, lv_color_hex(C_HEART), LV_PART_MAIN);
+      lv_obj_set_style_bg_opa(ht, LV_OPA_COVER, LV_PART_MAIN);
+      lv_obj_set_style_radius(ht, 5, LV_PART_MAIN);
+      lv_obj_set_style_border_width(ht, 0, LV_PART_MAIN);
+      lv_obj_clear_flag(ht, LV_OBJ_FLAG_SCROLLABLE);
+    }
+
+  homeb = dm_btn(page, "回主页", "Home", 110, 34, C_BTN, C_MUTED,
+                 done_home_cb, NULL);
+  lv_obj_set_pos(homeb, 40, 200);
+  againb = dm_btn(page, "再来一次", "Again", 110, 34, C_FACE, C_EYE,
+                  done_again_cb, NULL);
+  lv_obj_set_pos(againb, 170, 200);
+
+  lv_obj_add_flag(page, LV_OBJ_FLAG_HIDDEN);
 }
 
 #endif /* CONFIG_DESKMATE_APP */

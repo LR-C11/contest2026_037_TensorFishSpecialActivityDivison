@@ -301,7 +301,7 @@ void dm_create_settings(void)
   name = dm_lbl(c2, "关于", "About", g_dm_font_s, C_INK);
   lv_obj_set_pos(name, 0, 2);
   {
-    lv_obj_t *v = dm_lbl(c2, "Deskmate " DM_VER, "Deskmate " DM_VER,
+    lv_obj_t *v = dm_lbl(c2, "心流桌伴 " DM_VER, "心流桌伴 " DM_VER,
                          g_dm_font_s, C_MUTED);
     lv_obj_set_pos(v, 0, 20);
   }

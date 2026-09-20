@@ -9,12 +9,13 @@
 #include <string.h>
 #include <time.h>
 #include <fcntl.h>
+#include <math.h>
 #include <unistd.h>
 
 #ifdef CONFIG_DESKMATE_APP
 
 #define DM_MOOD_PATH "/data/deskmate_mood.bin"
-#define DM_MOOD_MAGIC 0x4d4f4f44u /* 'MOOD' */
+#define DM_MOOD_MAGIC 0x4d4f4f45u /* 'MOOD' v2: + yday for daily reset */
 
 #define M_NEG (DM_M_SAD | DM_M_ANGRY | DM_M_TIRED | DM_M_ANXIOUS | \
                DM_M_LONELY | DM_M_STRESS)
@@ -86,8 +87,22 @@ typedef struct
   uint32_t magic;
   uint32_t count;
   int32_t focus_done_min;
+  int32_t yday; /* tm_yday + tm_year*1000 — day of this snapshot */
+  int32_t game_ms; /* time on 2048 today */
   dm_mood_rec_t recs[DM_MOOD_REC_MAX];
 } dm_mood_file_t;
+
+static int32_t s_game_ms;
+
+static int health_today_key(void)
+{
+  time_t t = time(NULL);
+  struct tm tmv;
+  localtime_r(&t, &tmv);
+  return tmv.tm_yday + tmv.tm_year * 1000;
+}
+
+static int s_health_day_key = -1;
 
 static void store_save(void)
 {
@@ -98,6 +113,8 @@ static void store_save(void)
   f.magic = DM_MOOD_MAGIC;
   f.count = (uint32_t)s_rec_n;
   f.focus_done_min = g_dm.focus_done_min;
+  f.yday = health_today_key();
+  f.game_ms = s_game_ms;
   if (s_rec_n > 0)
     {
       memcpy(f.recs, s_recs, sizeof(dm_mood_rec_t) * (size_t)s_rec_n);
@@ -112,23 +129,61 @@ static void store_save(void)
   close(fd);
 }
 
+static void health_rollover_if_new_day(void)
+{
+  int key = health_today_key();
+  if (s_health_day_key < 0)
+    {
+      s_health_day_key = key;
+      return;
+    }
+  if (s_health_day_key == key)
+    {
+      return;
+    }
+  /* new calendar day: clear today-scoped stats */
+  s_rec_n = 0;
+  g_dm.focus_done_min = 0;
+  s_game_ms = 0;
+  s_health_day_key = key;
+  store_save();
+}
+
 static void store_load(void)
 {
   dm_mood_file_t f;
   int fd;
   ssize_t n;
+  int key = health_today_key();
 
   fd = open(DM_MOOD_PATH, O_RDONLY);
   if (fd < 0)
     {
+      s_health_day_key = key;
       return;
     }
   n = read(fd, &f, sizeof(f));
   close(fd);
+
   if (n != (ssize_t)sizeof(f) || f.magic != DM_MOOD_MAGIC)
     {
+      /* old/invalid file: start clean today */
+      s_rec_n = 0;
+      g_dm.focus_done_min = 0;
+      s_health_day_key = key;
       return;
     }
+
+  if (f.yday != key)
+    {
+      /* data from previous day — do not leak into today's score */
+      s_rec_n = 0;
+      g_dm.focus_done_min = 0;
+      s_health_day_key = key;
+      store_save();
+      return;
+    }
+
   if (f.count > DM_MOOD_REC_MAX)
     {
       f.count = DM_MOOD_REC_MAX;
@@ -139,6 +194,8 @@ static void store_load(void)
       memcpy(s_recs, f.recs, sizeof(dm_mood_rec_t) * (size_t)s_rec_n);
     }
   g_dm.focus_done_min = f.focus_done_min;
+  s_game_ms = f.game_ms;
+  s_health_day_key = key;
 }
 
 /* ---------- score ---------- */
@@ -164,140 +221,693 @@ static int mood_mask_score(uint16_t mask)
   return n ? (sum / n) : -1;
 }
 
-static int focus_score_from_min(int32_t min)
+/* Daily focus → 0-100 subscore. 0 min should not look "wavy-good".
+ * 0→20, 15→~36, 30→~52, 45→~68, 60+→95 */
+/* ===== multi-factor mood score (v1 board model) ===== */
+
+#define MF_WORDS_TARGET 25.0f
+#define MF_FOCUS_TARGET 150.0f
+#define MF_WATER_TARGET 8.0f
+
+typedef struct
 {
-  if (min <= 0)
+  const char *key;
+  float w;
+  float s;      /* 0..1 */
+  int valid;    /* 1 if present */
+} mf_item_t;
+
+static float clampf(float v, float lo, float hi)
+{
+  if (v < lo)
     {
-      return 40;
+      return lo;
     }
-  if (min >= 60)
+  if (v > hi)
     {
-      return 95;
+      return hi;
     }
-  return (int)(40 + min * 55 / 60);
+  return v;
+}
+
+static float mf_trapezoid(float x, float lo, float opt_lo, float opt_hi,
+                          float hi)
+{
+  if (x < lo || x > hi)
+    {
+      return 0.0f;
+    }
+  if (x < opt_lo)
+    {
+      return (x - lo) / (opt_lo - lo);
+    }
+  if (x <= opt_hi)
+    {
+      return 1.0f;
+    }
+  return (hi - x) / (hi - opt_hi);
+}
+
+static float mf_env_score(float t, float h, int has_t, int has_h)
+{
+  float st = 0.0f;
+  float sh = 0.0f;
+  int nt = 0;
+  int nh = 0;
+
+  if (has_t)
+    {
+      st = mf_trapezoid(t, 10.0f, 20.0f, 26.0f, 35.0f);
+      nt = 1;
+    }
+  if (has_h)
+    {
+      sh = mf_trapezoid(h, 20.0f, 40.0f, 60.0f, 85.0f);
+      nh = 1;
+    }
+  if (nt && nh)
+    {
+      return 0.6f * st + 0.4f * sh;
+    }
+  if (nt)
+    {
+      return st;
+    }
+  if (nh)
+    {
+      return sh;
+    }
+  return -1.0f;
+}
+
+static float mf_game_score(int game_ms)
+{
+  float g = (float)game_ms / 1000.0f / 60.0f; /* minutes */
+
+  if (game_ms < 0)
+    {
+      return -1.0f; /* missing */
+    }
+  if (g <= 0.0f)
+    {
+      return 0.55f; /* neutral if tracked as 0 */
+    }
+  if (g <= 30.0f)
+    {
+      return 0.55f + 0.45f * (g / 30.0f);
+    }
+  if (g <= 60.0f)
+    {
+      return 1.0f;
+    }
+  if (g <= 120.0f)
+    {
+      return 1.0f - 0.45f * ((g - 60.0f) / 60.0f);
+    }
+  if (g <= 180.0f)
+    {
+      return 0.55f - 0.35f * ((g - 120.0f) / 60.0f);
+    }
+  {
+    float v = 0.20f - 0.15f * ((g - 180.0f) / 60.0f);
+    return v < 0.05f ? 0.05f : v;
+  }
+}
+
+static int health_file_water_cups(void)
+{
+  /* prefer live UI state via getter when linked */
+  return dm_water_today_cups();
+}
+
+static void health_collect_mf(mf_item_t *out, int *n_out, int *cov100,
+                              int *n_factors)
+{
+  mf_item_t items[8];
+  int n = 0;
+  float t = 0.0f;
+  float h = 0.0f;
+  int has_env;
+  int words_n;
+  int sched = 0;
+  int taken = 0;
+  int water;
+  float ms = -1.0f;
+  float fscore;
+  float es;
+  int i;
+  float wsum = 0.0f;
+  float acc = 0.0f;
+  int nf = 0;
+
+  health_rollover_if_new_day();
+
+  has_env = (dm_sensor_last_th(&t, &h) == 0) ? 1 : 0;
+  es = mf_env_score(t, h, has_env, has_env);
+  words_n = dm_word_today_n();
+  water = health_file_water_cups();
+  (void)dm_med_today_stats(&sched, &taken);
+
+  /* env */
+  items[n].key = "env";
+  items[n].w = 0.15f;
+  items[n].valid = (es >= 0.0f) ? 1 : 0;
+  items[n].s = (es >= 0.0f) ? es : 0.0f;
+  n++;
+
+  /* words — if module used today (today_learn may be 0 after day rollover) */
+  items[n].key = "words";
+  items[n].w = 0.15f;
+  items[n].valid = 1; /* 0 words is valid low score once word app opened? treat 0 as valid neutral-low */
+  items[n].s = clampf((float)words_n / MF_WORDS_TARGET, 0.0f, 1.0f);
+  /* if never opened word store today_learn=0 — still valid 0 contribution after renormalize only if we mark valid.
+     Spec: 0 valid vs null missing. We treat unopened as 0 valid so learning is rewarded when used. */
+  n++;
+
+  /* focus */
+  fscore = (g_dm.focus_done_min <= 0)
+               ? 0.0f
+               : clampf((float)g_dm.focus_done_min / MF_FOCUS_TARGET, 0.0f, 1.0f);
+  items[n].key = "focus";
+  items[n].w = 0.25f;
+  items[n].valid = 1;
+  items[n].s = fscore;
+  n++;
+
+  /* med — missing if no schedule */
+  items[n].key = "med";
+  items[n].w = 0.20f;
+  if (sched > 0)
+    {
+      items[n].valid = 1;
+      items[n].s = clampf((float)taken / (float)sched, 0.0f, 1.0f);
+    }
+  else
+    {
+      items[n].valid = 0;
+      items[n].s = 0.0f;
+    }
+  n++;
+
+  /* water */
+  items[n].key = "water";
+  items[n].w = 0.15f;
+  items[n].valid = 1;
+  items[n].s = clampf((float)water / MF_WATER_TARGET, 0.0f, 1.0f);
+  n++;
+
+  /* game — track when 2048 used; 0ms still neutral if health engine always runs.
+     If s_game_ms==0 and never visited 2048, score as neutral 0.55 valid. */
+  items[n].key = "game";
+  items[n].w = 0.10f;
+  items[n].valid = 1;
+  items[n].s = mf_game_score(s_game_ms);
+  n++;
+
+  /* mood (tags/quick) — optional factor */
+  {
+    int mood_sum = 0;
+    int mood_n = 0;
+    for (i = 0; i < s_rec_n; i++)
+      {
+        int one = mood_mask_score(s_recs[i].mood_mask);
+        if (one < 0 && s_recs[i].quick > 0 && s_recs[i].quick <= DM_QUICK_MAX)
+          {
+            one = s_quick_score[s_recs[i].quick - 1];
+          }
+        else if (one >= 0 && s_recs[i].quick > 0 &&
+                 s_recs[i].quick <= DM_QUICK_MAX)
+          {
+            one = (one + s_quick_score[s_recs[i].quick - 1] + 1) / 2;
+          }
+        if (one >= 0)
+          {
+            mood_sum += one;
+            mood_n++;
+          }
+      }
+    items[n].key = "mood";
+    items[n].w = 0.14f;
+    if (mood_n > 0)
+      {
+        float mv = (float)((mood_sum + mood_n / 2) / mood_n) / 100.0f;
+        items[n].valid = 1;
+        items[n].s = clampf(mv, 0.0f, 1.0f);
+        ms = items[n].s;
+      }
+    else
+      {
+        items[n].valid = 0;
+        items[n].s = 0.0f;
+      }
+    n++;
+  }
+  (void)ms;
+
+  /* renormalize */
+  for (i = 0; i < n; i++)
+    {
+      if (!items[i].valid)
+        {
+          continue;
+        }
+      acc += items[i].w * items[i].s;
+      wsum += items[i].w;
+      nf++;
+    }
+
+  *n_out = n;
+  *n_factors = nf;
+  *cov100 = (int)(wsum * 100.0f + 0.5f);
+  if (wsum <= 0.0001f)
+    {
+      out[0].s = 0.5f; /* unused */
+      out[0].valid = 0;
+      out[0].key = "none";
+      *n_out = 0;
+      return;
+    }
+  /* store final normalized 0..1 in out[0].s via dedicated fields — use out array copy */
+  for (i = 0; i < n; i++)
+    {
+      out[i] = items[i];
+    }
+  out[0].valid = 2; /* sentinel: out[0].s not used for total */
+  /* encode total in cov unused — return via static */
+  {
+    /* place total in items — health_score will recompute using same logic for simplicity */
+  }
+  (void)acc;
+}
+
+/* ===== mood score ported from 静心轨迹 / score-detail.ux ===== */
+
+#define M_NEG_MASK (DM_M_SAD | DM_M_ANGRY | DM_M_TIRED | DM_M_ANXIOUS | \
+                    DM_M_LONELY | DM_M_STRESS)
+#define M_POS_MASK (DM_M_JOY | DM_M_LOVE | DM_M_EXCITE | DM_M_CONFIDENT | \
+                    DM_M_EXPECT | DM_M_SATISFY | DM_M_TOUCHED | DM_M_CALM)
+
+static int s_last_cov;
+static int s_last_nf;
+static int s_last_mood_n;
+static int s_last_mood_score;
+static int s_last_behavior;
+static int s_last_has_mood;
+static int s_last_has_beh;
+
+/* per-record mood score — same as calculateScore in score-detail.ux */
+static float mood_record_score(const dm_mood_rec_t *rec)
+{
+  float base = 50.0f;
+  int pos = 0;
+  int neg = 0;
+  int i;
+  int ntag = 0;
+  float tsum = 0.0f;
+
+  /* type average */
+  for (i = 0; i < (int)(sizeof(s_moods) / sizeof(s_moods[0])); i++)
+    {
+      if (rec->mood_mask & s_moods[i].bit)
+        {
+          tsum += (float)s_moods[i].score;
+          ntag++;
+          if (s_moods[i].bit & M_POS_MASK)
+            {
+              pos++;
+            }
+          if (s_moods[i].bit & M_NEG_MASK)
+            {
+              neg++;
+            }
+        }
+    }
+  if (ntag > 0)
+    {
+      base = tsum / (float)ntag;
+      /* mixed positive+negative: down up to 30% */
+      if (pos > 0 && neg > 0)
+        {
+          float ratio = (float)neg / (float)(pos + neg);
+          base = base * (1.0f - ratio * 0.3f);
+        }
+    }
+
+  /* quick text: 30% blend (same as app) */
+  if (rec->quick > 0 && rec->quick <= DM_QUICK_MAX)
+    {
+      float qs = (float)s_quick_score[rec->quick - 1];
+      base = base * 0.7f + qs * 0.3f;
+    }
+
+  return base;
+}
+
+/* weighted avg + stability bonus — same as score-detail.ux */
+static int mood_score_from_recs(const dm_mood_rec_t *recs, int n)
+{
+  float wsum = 0.0f;
+  float acc = 0.0f;
+  float list[DM_MOOD_REC_MAX];
+  float final;
+  int i;
+  float bonus = 0.0f;
+
+  if (n <= 0 || !recs)
+    {
+      return -1;
+    }
+  if (n > DM_MOOD_REC_MAX)
+    {
+      n = DM_MOOD_REC_MAX;
+    }
+
+  for (i = 0; i < n; i++)
+    {
+      list[i] = mood_record_score(&recs[i]);
+      /* recs[0] is newest → weight = n - i */
+      {
+        float w = (float)(n - i);
+        acc += list[i] * w;
+        wsum += w;
+      }
+    }
+
+  final = (wsum > 0.0f) ? (acc / wsum) : 50.0f;
+
+  /* stability: last up to 5 records in list order (index 0..min(n,5)-1 = newest first in Deskmate)
+   * App used slice(-5) oldest-of-recent on their list order.
+   * Deskmate stores newest at [0]; use up to 5 newest = list[0..m-1]. */
+  if (n >= 3)
+    {
+      int m = n < 5 ? n : 5;
+      float avg = 0.0f;
+      float var = 0.0f;
+      float sd;
+      for (i = 0; i < m; i++)
+        {
+          avg += list[i];
+        }
+      avg /= (float)m;
+      for (i = 0; i < m; i++)
+        {
+          float d = list[i] - avg;
+          var += d * d;
+        }
+      var /= (float)m;
+      sd = (float)sqrt((double)var);
+      if (sd < 10.0f)
+        {
+          bonus = 5.0f;
+        }
+      else if (sd < 20.0f)
+        {
+          bonus = 3.0f;
+        }
+      else if (sd < 30.0f)
+        {
+          bonus = 1.0f;
+        }
+    }
+
+  final = final + bonus;
+  if (final < 0.0f)
+    {
+      final = 0.0f;
+    }
+  if (final > 100.0f)
+    {
+      final = 100.0f;
+    }
+  return (int)(final + 0.5f);
+}
+
+/* behavior multi-factor 0..100 — env/words/focus/med/water/game */
+static int behavior_score_from_board(int *cov100, int *nf)
+{
+  float t = 0.0f;
+  float h = 0.0f;
+  int has_env;
+  float es;
+  int words_n;
+  int water;
+  int sched = 0;
+  int taken = 0;
+  float items_s[6];
+  float items_w[6];
+  int items_ok[6];
+  int n = 6;
+  int i;
+  float acc = 0.0f;
+  float wsum = 0.0f;
+  int cnt = 0;
+
+  has_env = (dm_sensor_last_th(&t, &h) == 0) ? 1 : 0;
+  es = mf_env_score(t, h, has_env, has_env);
+  words_n = dm_word_today_n();
+  water = dm_water_today_cups();
+  (void)dm_med_today_stats(&sched, &taken);
+
+  items_w[0] = 0.15f;
+  items_s[0] = es;
+  items_ok[0] = (es >= 0.0f) ? 1 : 0;
+
+  items_w[1] = 0.15f;
+  items_s[1] = clampf((float)words_n / MF_WORDS_TARGET, 0.0f, 1.0f);
+  items_ok[1] = 1;
+
+  items_w[2] = 0.25f;
+  items_s[2] = (g_dm.focus_done_min <= 0)
+                   ? 0.0f
+                   : clampf((float)g_dm.focus_done_min / MF_FOCUS_TARGET,
+                            0.0f, 1.0f);
+  items_ok[2] = 1;
+
+  items_w[3] = 0.20f;
+  if (sched > 0)
+    {
+      items_s[3] = clampf((float)taken / (float)sched, 0.0f, 1.0f);
+      items_ok[3] = 1;
+    }
+  else
+    {
+      items_s[3] = 0.0f;
+      items_ok[3] = 0;
+    }
+
+  items_w[4] = 0.15f;
+  items_s[4] = clampf((float)water / MF_WATER_TARGET, 0.0f, 1.0f);
+  items_ok[4] = 1;
+
+  items_w[5] = 0.10f;
+  items_s[5] = mf_game_score(s_game_ms);
+  items_ok[5] = 1;
+
+  for (i = 0; i < n; i++)
+    {
+      if (!items_ok[i])
+        {
+          continue;
+        }
+      acc += items_w[i] * items_s[i];
+      wsum += items_w[i];
+      cnt++;
+    }
+  if (nf)
+    {
+      *nf = cnt;
+    }
+  if (cov100)
+    {
+      *cov100 = (int)(wsum * 100.0f + 0.5f);
+    }
+  if (wsum <= 0.0001f || cnt <= 0)
+    {
+      return -1;
+    }
+  return (int)((acc / wsum) * 100.0f + 0.5f);
 }
 
 int dm_health_score(void)
 {
-  int mood_sum = 0;
-  int mood_n = 0;
-  int i;
-  int ms;
-  int fs;
-  int total;
+  int mood_v;
+  int beh_v;
+  int cov = 0;
+  int nf = 0;
 
-  for (i = 0; i < s_rec_n; i++)
-    {
-      int one = mood_mask_score(s_recs[i].mood_mask);
-      if (one < 0 && s_recs[i].quick > 0 && s_recs[i].quick <= DM_QUICK_MAX)
-        {
-          one = s_quick_score[s_recs[i].quick - 1];
-        }
-      else if (one >= 0 && s_recs[i].quick > 0 &&
-               s_recs[i].quick <= DM_QUICK_MAX)
-        {
-          one = (one + s_quick_score[s_recs[i].quick - 1]) / 2;
-        }
-      if (one >= 0)
-        {
-          mood_sum += one;
-          mood_n++;
-        }
-    }
+  health_rollover_if_new_day();
 
-  ms = mood_n ? (mood_sum / mood_n) : -1;
-  fs = focus_score_from_min(g_dm.focus_done_min);
-  total = (ms < 0) ? fs : ((ms * 6 + fs * 4) / 10);
-  if (total < 0)
+  mood_v = mood_score_from_recs(s_recs, s_rec_n);
+  beh_v = behavior_score_from_board(&cov, &nf);
+
+  s_last_mood_n = s_rec_n;
+  s_last_mood_score = mood_v;
+  s_last_behavior = beh_v;
+  s_last_cov = cov;
+  s_last_nf = nf;
+  s_last_has_mood = (mood_v >= 0) ? 1 : 0;
+  s_last_has_beh = (beh_v >= 0) ? 1 : 0;
+
+  /* blend: mood algorithm (静心轨迹) + board behavior factors */
+  if (mood_v >= 0 && beh_v >= 0)
     {
-      total = 0;
+      return (mood_v * 6 + beh_v * 4) / 10;
     }
-  if (total > 100)
+  if (mood_v >= 0)
     {
-      total = 100;
+      return mood_v;
     }
-  return total;
+  if (beh_v >= 0)
+    {
+      return beh_v;
+    }
+  return 50;
+}
+
+int dm_health_score_detail(char *buf, int cap)
+{
+  int v = dm_health_score();
+  if (!buf || cap < 8)
+    {
+      return v;
+    }
+  if (!s_last_has_mood && !s_last_has_beh)
+    {
+      snprintf(buf, (size_t)cap, "暂无数据");
+      return v;
+    }
+  if (s_last_has_mood && s_last_has_beh)
+    {
+      snprintf(buf, (size_t)cap, "心情%d + 行为%d", s_last_mood_score,
+               s_last_behavior);
+      return v;
+    }
+  if (s_last_has_mood)
+    {
+      snprintf(buf, (size_t)cap, "仅心情 %d 分 · %d 条", s_last_mood_score,
+               s_last_mood_n);
+      return v;
+    }
+  snprintf(buf, (size_t)cap, "仅行为分 %d · 覆盖 %d%%", s_last_behavior,
+           s_last_cov);
+  return v;
 }
 
 static uint32_t score_color(int v)
 {
-  if (v >= 60)
+  if (v >= 70)
     {
-      return C_OK;
+      return C_OK; /* green */
+    }
+  if (v >= 55)
+    {
+      return C_STAR; /* yellow */
     }
   if (v >= 40)
     {
-      return C_STAR;
+      return 0xFF9500; /* orange */
     }
-  return C_HEART;
+  return C_HEART; /* red */
 }
 
 static const char *score_tag_zh(int v)
 {
-  if (v >= 80)
+  if (!s_last_has_mood && !s_last_has_beh)
     {
-      return "状态很好";
+      return "暂无记录";
     }
-  if (v >= 60)
+  if (v >= 85)
     {
-      return "状态良好";
+      return "非常好";
+    }
+  if (v >= 70)
+    {
+      return "良好";
+    }
+  if (v >= 55)
+    {
+      return "一般";
     }
   if (v >= 40)
     {
-      return "有些波动";
+      return "偏低";
     }
-  return "需要关照";
+  return "需要注意";
 }
 
 static const char *score_tag_en(int v)
 {
-  if (v >= 80)
+  if (!s_last_has_mood && !s_last_has_beh)
     {
-      return "Great";
+      return "No data yet";
     }
-  if (v >= 60)
+  if (v >= 85)
+    {
+      return "Excellent";
+    }
+  if (v >= 70)
     {
       return "Good";
     }
+  if (v >= 55)
+    {
+      return "Fair";
+    }
   if (v >= 40)
     {
-      return "Wavy";
+      return "Low";
     }
   return "Take care";
 }
 
 static const char *score_msg_zh(int v)
 {
-  if (v >= 80)
+  if (!s_last_has_mood && !s_last_has_beh)
     {
-      return "正向记录+专注都不错";
+      return "记录心情或开始专注/喝水后计分";
     }
-  if (v >= 60)
+  if (v >= 85)
     {
-      return "综合状态良好，累了记得休息";
+      return "精神状态非常好，继续保持！";
+    }
+  if (v >= 70)
+    {
+      return "状态不错，继续加油！";
+    }
+  if (v >= 55)
+    {
+      return "注意适当休息，保持好心情！";
     }
   if (v >= 40)
     {
-      return "情绪或专注有起伏，走动一下吧";
+      return "建议适当放松，调整状态！";
     }
-  return "负向偏多，我陪你慢一点";
+  return "建议充分休息，必要时寻求帮助。";
 }
 
 static const char *score_msg_en(int v)
 {
-  if (v >= 80)
+  if (!s_last_has_mood && !s_last_has_beh)
     {
-      return "Mood and focus look strong";
+      return "Log mood or focus/water to score";
     }
-  if (v >= 60)
+  if (v >= 85)
     {
-      return "Doing well — rest if tired";
+      return "You're in great shape — keep it up!";
+    }
+  if (v >= 70)
+    {
+      return "Doing well, keep going!";
+    }
+  if (v >= 55)
+    {
+      return "Take some rest, stay easy.";
     }
   if (v >= 40)
     {
-      return "Some ups and downs.";
+      return "Try to relax and reset.";
     }
-  return "Rough patch. Take it easy.";
+  return "Rest well; seek help if needed.";
 }
 
 /* ---------- helpers ---------- */
@@ -349,6 +959,21 @@ void dm_health_add_focus_min(int32_t min)
         }
       store_save();
     }
+}
+
+void dm_health_add_game_ms(int ms)
+{
+  health_rollover_if_new_day();
+  if (ms <= 0)
+    {
+      return;
+    }
+  s_game_ms += ms;
+  if (s_game_ms > 4 * 3600 * 1000)
+    {
+      s_game_ms = 4 * 3600 * 1000;
+    }
+  store_save();
 }
 
 static void rebuild_list(void)
@@ -426,8 +1051,11 @@ static void rebuild_list(void)
 
 void dm_health_refresh(void)
 {
-  int v = dm_health_score();
+  int v;
   char b[48];
+
+  health_rollover_if_new_day();
+  v = dm_health_score();
 
   if (s_score_lbl)
     {
@@ -448,9 +1076,10 @@ void dm_health_refresh(void)
     }
   if (s_focus_lbl)
     {
-      lv_snprintf(b, sizeof(b), "%s %ld min · %s %d",
+      lv_snprintf(b, sizeof(b), "%s %ld′ · %s %d · %s %d",
                   dm_t("专注", "Focus"), (long)g_dm.focus_done_min,
-                  dm_t("心情", "Mood"), s_rec_n);
+                  dm_t("心情", "Mood"), s_rec_n,
+                  dm_t("水", "H2O"), dm_water_today_cups());
       lv_label_set_text(s_focus_lbl, b);
     }
   rebuild_list();
@@ -714,8 +1343,8 @@ void dm_create_health(void)
     lv_obj_t *tipc = mk_card(s_sc, 56);
     lv_obj_t *tt = dm_lbl(tipc, "说明", "Note", g_dm_font_s, C_MUTED);
     lv_obj_t *tb = dm_lbl(tipc,
-                          "评分 = 心情 + 今日专注\n保存后会写入本地",
-                          "Score = mood + focus\nSaved locally",
+                          "评分=心情/专注/喝水/吃药/单词/环境/游戏\n缺失因子会重归一，每日0点清零",
+                          "Mood+focus+water+med+words+env+game\nRenorm; resets daily",
                           g_dm_font_s, C_DIM);
     lv_obj_set_pos(tt, 0, 0);
     lv_label_set_long_mode(tb, LV_LABEL_LONG_WRAP);

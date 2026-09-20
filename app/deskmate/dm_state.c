@@ -15,7 +15,7 @@ dm_ctx_t g_dm = {
   .focus_left = 25 * 60,
   .focus_total = 25 * 60,
   .focus_sel_min = 25,
-  .focus_custom_min = 30,
+  .focus_custom_min = 1,
   .focus_run = false,
   .focus_finished = false,
   .zh = true,
@@ -197,11 +197,18 @@ void dm_show(dm_page_t p)
 
   if (g_dm_dock)
     {
-      if (p == PAGE_FOCUS_RUN || p == PAGE_MOOD_LOG || p == PAGE_SUPERVISE ||
+      if (p == PAGE_FOCUS_RUN || p == PAGE_FOCUS_DONE || p == PAGE_MOOD_LOG ||
+          p == PAGE_SUPERVISE ||
           p == PAGE_NOTE || p == PAGE_WIFI_PW || p == PAGE_WIFI_CONN ||
           p == PAGE_WIFI_DONE || p == PAGE_WORD_STUDY || p == PAGE_WORD_RES ||
           p == PAGE_WORD_QUIZ || p == PAGE_WORD_WRONG ||
-          p == PAGE_WORD_LIST || p == PAGE_WORD_WSET)
+          p == PAGE_WORD_LIST || p == PAGE_WORD_WSET || p == PAGE_CALC ||
+          p == PAGE_SENSORS || p == PAGE_GUESS || p == PAGE_CONVERT ||
+          p == PAGE_WATER || p == PAGE_COUNTDOWN || p == PAGE_EAT ||
+          p == PAGE_24 || p == PAGE_DRAW || p == PAGE_BMI || p == PAGE_MED ||
+          p == PAGE_MED_ADD || p == PAGE_MED_KB || p == PAGE_2048 ||
+          p == PAGE_MBTI || p == PAGE_MBTI_Q || p == PAGE_MBTI_RESULT ||
+          p == PAGE_NOTE_ADD || p == PAGE_NOTE_KB)
         {
           lv_obj_add_flag(g_dm_dock, LV_OBJ_FLAG_HIDDEN);
         }
@@ -212,7 +219,20 @@ void dm_show(dm_page_t p)
       dm_dock_highlight(p);
     }
 
-  if (p == PAGE_FOCUS_HOME && g_dm_pages[PAGE_FOCUS_HOME])
+  if (p == PAGE_HEALTH)
+    {
+      dm_health_refresh();
+    }
+
+  if (p == PAGE_CHAT && g_dm_pages[PAGE_CHAT])
+    {
+      dm_face_attach(g_dm_pages[PAGE_CHAT], (DM_SCR_W - 76) / 2, 32);
+      if (g_dm_face)
+        {
+          lv_obj_set_size(g_dm_face, 76, 76);
+        }
+    }
+  else if (p == PAGE_FOCUS_HOME && g_dm_pages[PAGE_FOCUS_HOME])
     {
       dm_face_attach(g_dm_pages[PAGE_FOCUS_HOME], (DM_SCR_W - 68) / 2, 24);
       if (g_dm_face)
@@ -228,8 +248,16 @@ void dm_show(dm_page_t p)
           lv_obj_set_size(g_dm_face, 84, 84);
         }
     }
+  else if (p == PAGE_FOCUS_DONE && g_dm_pages[PAGE_FOCUS_DONE])
+    {
+      dm_face_attach(g_dm_pages[PAGE_FOCUS_DONE], (DM_SCR_W - 64) / 2, 22);
+      if (g_dm_face)
+        {
+          lv_obj_set_size(g_dm_face, 64, 64);
+        }
+    }
 
-  if (p != PAGE_FOCUS_RUN && g_dm.focus_run)
+  if (p != PAGE_FOCUS_RUN && p != PAGE_FOCUS_DONE && g_dm.focus_run)
     {
       dm_face_set(FACE_IDLE, EYE_DECOR_NONE, 0);
     }
@@ -237,9 +265,18 @@ void dm_show(dm_page_t p)
 
 void dm_tick(void)
 {
+  if (g_dm.page == PAGE_2048)
+    {
+      dm_health_add_game_ms(DM_TICK_MS);
+    }
   dm_face_tick();
   dm_focus_run_tick();
   dm_wifi_tick();
+  dm_tools_tick();
+  dm_life_tick();
+  dm_fun_tick();
+  dm_chat_tick();
+  dm_med_tick();
 }
 
 #endif /* CONFIG_DESKMATE_APP */
