@@ -97,8 +97,7 @@ typedef struct
 void dm_create_features(void)
 {
   static const fn_entry_t entries[] = {
-    { "监督", "Supervise", "盯着你完成一件事", "Watch one task",
-      PAGE_SUPERVISE },
+    /* 监督 Supervise hidden from menu */
     { "备忘", "Notes", "帮你记一下东西", "Remember things", PAGE_NOTE },
     { "背单词", "Word Memo", "学习 / 复习 / 测验 / 错题",
       "Study / quiz / wrong", PAGE_WORD_HOME },
