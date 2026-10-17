@@ -197,10 +197,13 @@ void dm_show(dm_page_t p)
 
   if (g_dm_dock)
     {
+      /* Fix: Hide bottom dock on PAGE_WIFI as well so it does not cover
+       * the AP list and the "连接所选" (Join) button at y=202..230. */
       if (p == PAGE_FOCUS_RUN || p == PAGE_FOCUS_DONE || p == PAGE_MOOD_LOG ||
           p == PAGE_SUPERVISE ||
-          p == PAGE_NOTE || p == PAGE_WIFI_PW || p == PAGE_WIFI_CONN ||
-          p == PAGE_WIFI_DONE || p == PAGE_WORD_STUDY || p == PAGE_WORD_RES ||
+          p == PAGE_NOTE || p == PAGE_WIFI || p == PAGE_WIFI_PW ||
+          p == PAGE_WIFI_CONN || p == PAGE_WIFI_DONE ||
+          p == PAGE_WORD_STUDY || p == PAGE_WORD_RES ||
           p == PAGE_WORD_QUIZ || p == PAGE_WORD_WRONG ||
           p == PAGE_WORD_LIST || p == PAGE_WORD_WSET || p == PAGE_CALC ||
           p == PAGE_SENSORS || p == PAGE_GUESS || p == PAGE_CONVERT ||
