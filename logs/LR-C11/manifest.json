@@ -3,7 +3,7 @@
   "team_id": "contest2026_037_TensorFishSpecialActivityDivison",
   "github_login": "LR-C11",
   "generator": "manual-ai-log-exporter@1.0.0",
-  "updated_at": "2026-10-18T11:31:43.206Z",
+  "updated_at": "2026-10-20T11:31:22.528Z",
   "sessions": [
     {
       "session_id": "session-fe6b49d1-ce6e-4de8-917c-683649e91cc1",
@@ -28,6 +28,42 @@
       "health": "ok",
       "model": "deepseek-flash",
       "redacted_count_total": 5
+    },
+    {
+      "session_id": "session-fe6b49d1-ce6e-4de8-917c-683649e91cc1",
+      "tool": "deepseekharness",
+      "started_at": "2026-10-17T14:21:56.522Z",
+      "last_event_at": "2026-10-20T09:10:58.982Z",
+      "event_count": 2099,
+      "file_path": "logs/LR-C11/2026-10-20/deepseekharness__session-fe6b49d1-ce6e-4de8-917c-683649e91cc1.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "deepseek-flash",
+      "redacted_count_total": 5
+    },
+    {
+      "session_id": "session-2fb1fdda-409f-4379-9252-d95129bf5198",
+      "tool": "deepseekharness",
+      "started_at": "2026-10-18T14:20:40.647Z",
+      "last_event_at": "2026-10-18T14:59:11.883Z",
+      "event_count": 241,
+      "file_path": "logs/LR-C11/2026-10-18/deepseekharness__session-2fb1fdda-409f-4379-9252-d95129bf5198.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "deepseek-flash",
+      "redacted_count_total": 1
+    },
+    {
+      "session_id": "session-d7d7bbf0-d897-4844-8eb7-6e367c34ce8a",
+      "tool": "deepseekharness",
+      "started_at": "2026-10-18T14:20:40.647Z",
+      "last_event_at": "2026-10-18T14:59:11.883Z",
+      "event_count": 241,
+      "file_path": "logs/LR-C11/2026-10-18/deepseekharness__session-d7d7bbf0-d897-4844-8eb7-6e367c34ce8a.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "deepseek-flash",
+      "redacted_count_total": 1
     }
   ]
 }
