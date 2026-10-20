@@ -236,6 +236,7 @@ void dm_focus_start(void)
 
 void dm_focus_show_done(int32_t minutes)
 {
+  dm_proactive_focus_done(minutes);
   static const char *zh[] = {
     "太棒了，这一段你很专注",
     "完成得很漂亮，休息一下",

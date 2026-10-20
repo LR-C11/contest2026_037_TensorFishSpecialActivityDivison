@@ -59,6 +59,7 @@ int flowdesk_main(int argc, FAR char *argv[])
     }
 
   dm_init_fonts();
+  dm_voice_profile_init();
 
   g_dm_root = lv_obj_create(lv_screen_active());
   lv_obj_set_size(g_dm_root, DM_SCR_W, DM_SCR_H);
@@ -81,7 +82,12 @@ int flowdesk_main(int argc, FAR char *argv[])
   dm_create_tools();
   dm_create_life();
   dm_create_fun();
+  dm_create_2048();
   dm_create_mbti();
+  dm_create_dict();
+  dm_create_volume();
+  dm_create_voice_sel();
+  dm_create_about();
   dm_create_med();
   dm_create_note();
   dm_create_settings();

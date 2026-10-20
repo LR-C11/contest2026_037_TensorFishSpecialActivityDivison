@@ -34,8 +34,9 @@ static uint32_t dm_bt_compute_response(uint32_t challenge)
 int dm_bt_verify_pair(uint32_t challenge, uint32_t response)
 {
   uint32_t expected = dm_bt_compute_response(challenge);
-  syslog(LOG_INFO, "[bt-pair] challenge=0x%x resp=0x%x expected=0x%x\n",
-         challenge, response, expected);
+  syslog(LOG_INFO, "[bt-pair] challenge=0x%lx resp=0x%lx expected=0x%lx\n",
+         (unsigned long)challenge, (unsigned long)response,
+         (unsigned long)expected);
   return (response == expected) ? 0 : -1;
 }
 

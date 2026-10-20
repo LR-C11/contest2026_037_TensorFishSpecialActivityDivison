@@ -212,7 +212,11 @@ void dm_show(dm_page_t p)
           p == PAGE_24 || p == PAGE_DRAW || p == PAGE_BMI || p == PAGE_MED ||
           p == PAGE_MED_ADD || p == PAGE_MED_KB || p == PAGE_2048 ||
           p == PAGE_MBTI || p == PAGE_MBTI_Q || p == PAGE_MBTI_RESULT ||
-          p == PAGE_NOTE_ADD || p == PAGE_NOTE_KB)
+          p == PAGE_NOTE_ADD || p == PAGE_NOTE_KB ||
+          p == PAGE_DICT || p == PAGE_DICT_SEARCH || p == PAGE_DICT_DETAIL ||
+          p == PAGE_VOLUME ||
+          p == PAGE_VOICE_SEL ||
+          p == PAGE_ABOUT)
         {
           lv_obj_add_flag(g_dm_dock, LV_OBJ_FLAG_HIDDEN);
         }
@@ -276,6 +280,7 @@ void dm_tick(void)
   dm_face_tick();
   dm_focus_run_tick();
   dm_wifi_tick();
+  dm_proactive_tick();
   dm_btnet_tick();
   dm_appconn_tick();
   dm_tools_tick();

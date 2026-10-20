@@ -319,6 +319,24 @@ static void open_btnet(lv_event_t *e)
   dm_show(PAGE_BT_NET);
 }
 
+static void open_voice_sel(lv_event_t *e)
+{
+  (void)e;
+  dm_show(PAGE_VOICE_SEL);
+}
+
+static void open_volume(lv_event_t *e)
+{
+  (void)e;
+  dm_show(PAGE_VOLUME);
+}
+
+static void open_about(lv_event_t *e)
+{
+  (void)e;
+  dm_show(PAGE_ABOUT);
+}
+
 static void open_wifi(lv_event_t *e)
 {
   (void)e;
@@ -657,15 +675,15 @@ void dm_create_settings(void)
   lv_obj_add_event_cb(s_wifi_sw, wifi_switch_cb, LV_EVENT_VALUE_CHANGED,
                       NULL);
 
-  /* BT Network entry */
+  /* BT Headset entry */
   lv_obj_t *c_bt = card(sc, 56);
   lv_obj_set_width(c_bt, 288);
   lv_obj_add_flag(c_bt, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(c_bt, open_btnet, LV_EVENT_CLICKED, NULL);
-  name = dm_lbl(c_bt, "蓝牙网络", "BT Network", g_dm_font_s, C_INK);
+  name = dm_lbl(c_bt, "蓝牙耳机", "BT Headset", g_dm_font_s, C_INK);
   lv_obj_set_pos(name, 0, 2);
   {
-    lv_obj_t *sub = dm_lbl(c_bt, "通过蓝牙共享上网", "BT tethering",
+    lv_obj_t *sub = dm_lbl(c_bt, "连接 A2DP 蓝牙耳机", "A2DP headset",
                            g_dm_font_s, C_MUTED);
     lv_obj_set_pos(sub, 0, 22);
   }
@@ -687,8 +705,46 @@ void dm_create_settings(void)
   arrow = dm_lbl(c_app, "›", "›", g_dm_font_m, C_MUTED);
   lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -4, 0);
 
-  c2 = card(sc, 48);
+  /* Volume settings entry */
+  {
+    lv_obj_t *c_vol = card(sc, 56);
+    lv_obj_set_width(c_vol, 288);
+    lv_obj_add_flag(c_vol, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(c_vol, open_volume, LV_EVENT_CLICKED, NULL);
+    name = dm_lbl(c_vol, "音量", "Volume", g_dm_font_s, C_INK);
+    lv_obj_set_pos(name, 0, 2);
+    {
+      lv_obj_t *sub = dm_lbl(c_vol, "喇叭音量 / 静音 / 试听",
+                             "Speaker / mute / test",
+                             g_dm_font_s, C_MUTED);
+      lv_obj_set_pos(sub, 0, 22);
+    }
+    arrow = dm_lbl(c_vol, "›", "›", g_dm_font_m, C_MUTED);
+    lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -4, 0);
+  }
+
+  /* Voice selection entry */
+  {
+    lv_obj_t *c_vo = card(sc, 56);
+    lv_obj_set_width(c_vo, 288);
+    lv_obj_add_flag(c_vo, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(c_vo, open_voice_sel, LV_EVENT_CLICKED, NULL);
+    name = dm_lbl(c_vo, "播报声音", "Voice", g_dm_font_s, C_INK);
+    lv_obj_set_pos(name, 0, 2);
+    {
+      lv_obj_t *sub = dm_lbl(c_vo, "冰糖 / 茉莉 / 苏打 / 白桦 等",
+                             "Multiple TTS voices",
+                             g_dm_font_s, C_MUTED);
+      lv_obj_set_pos(sub, 0, 22);
+    }
+    arrow = dm_lbl(c_vo, "›", "›", g_dm_font_m, C_MUTED);
+    lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -4, 0);
+  }
+
+  c2 = card(sc, 56);
   lv_obj_set_width(c2, 288);
+  lv_obj_add_flag(c2, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(c2, open_about, LV_EVENT_CLICKED, NULL);
   name = dm_lbl(c2, "关于", "About", g_dm_font_s, C_INK);
   lv_obj_set_pos(name, 0, 2);
   {

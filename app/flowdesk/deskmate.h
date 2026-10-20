@@ -12,7 +12,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.16.0"
+#define DM_VER "0.18.1"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -95,6 +95,12 @@ typedef enum {
   PAGE_MBTI,
   PAGE_MBTI_Q,
   PAGE_MBTI_RESULT,
+  PAGE_DICT,
+  PAGE_DICT_SEARCH,
+  PAGE_DICT_DETAIL,
+  PAGE_VOLUME,
+  PAGE_VOICE_SEL,
+  PAGE_ABOUT,
   PAGE_COUNT
 } dm_page_t;
 
@@ -229,6 +235,14 @@ void dm_create_chat(void);
 void dm_create_health(void);
 void dm_create_2048(void);
 void dm_create_mbti(void);
+void dm_create_dict(void);
+void dm_create_volume(void);
+void dm_create_voice_sel(void);
+void dm_create_about(void);
+void dm_voice_profile_init(void);
+void dm_proactive_tick(void);
+void dm_proactive_focus_done(int32_t minutes);
+int dm_dict_ai_define(const char *word, char *out, int cap);
 void dm_chat_tick(void);
 int dm_chat_ai_available(void);
 const char *dm_chat_ai_ask(const char *user_text);
