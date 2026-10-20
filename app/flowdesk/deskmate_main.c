@@ -22,7 +22,7 @@ static void tick_cb(lv_timer_t *t)
   dm_tick();
 }
 
-int deskmate_main(int argc, FAR char *argv[])
+int flowdesk_main(int argc, FAR char *argv[])
 {
   lv_nuttx_dsc_t info;
   lv_nuttx_result_t result;
@@ -35,7 +35,7 @@ int deskmate_main(int argc, FAR char *argv[])
       return -1;
     }
 
-  /* LCD is owned by deskmate; luncher_mini is not started from rcS
+  /* LCD is owned by flowdesk; luncher_mini is not started from rcS
    * when CONFIG_DESKMATE_APP is enabled. killall is unavailable on
    * this NuttX image, so do not rely on it. */
 
@@ -86,15 +86,17 @@ int deskmate_main(int argc, FAR char *argv[])
   dm_create_note();
   dm_create_settings();
   dm_create_wifi();
+  dm_create_btnet();
+  dm_create_app_connect();
   dm_create_dock();
   dm_show(PAGE_FOCUS_HOME);
 
-  /* Auto-connect home WiFi; manual WiFi page still works. */
-  dm_wifi_auto_start();
+  /* WiFi is manual-only now: no boot auto-connect.
+   * The user connects from Settings > Wi-Fi (logic ported from the 9.5 demo). */
 
   lv_timer_create(tick_cb, DM_TICK_MS, NULL);
 
-  LV_LOG_USER("Deskmate " DM_VER " focus-home zh=%d", (int)g_dm.zh);
+  LV_LOG_USER("FlowDesk " DM_VER " focus-home zh=%d", (int)g_dm.zh);
 
   while (true)
     {

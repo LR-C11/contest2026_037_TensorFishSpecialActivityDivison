@@ -18,6 +18,18 @@
  *   3. Robust wapi scan parser: skips non-MAC header/log lines, preserves SSIDs
  *      containing spaces, deduplicates BSSIDs, and sorts by RSSI descending.
  *   4. Avoids double DHCP calls in the same loop iteration.
+ *   5. Credentials are saved only AFTER an IP was obtained and the requested
+ *      ESSID verified (a wrong password no longer poisons boot auto-connect).
+ *   6. Previous association/key is dropped before each attempt, and open APs
+ *      explicitly clear any leftover WPA key (alg NONE).
+ *   7. wapi command return codes are checked (psk/essid/save_config) and the
+ *      password length (8..63) is validated in the UI.
+ *   8. Hardcoded fallback SSID/password removed from source.
+ *   9. Manual-only: boot auto-connect is no longer invoked (deskmate_main.c);
+ *      Settings > Wi-Fi drives scan/connect, like the 9.5 lvgldemo demo.
+ *  10. Ported from 9.5 wifi_manager.c: the connect sequence retries up to
+ *      DM_WIFI_CONN_ROUNDS with a 5s gap, and uses "wapi show" (AP all-zero)
+ *      as an extra association check in addition to the IPv4 check.
  ****************************************************************************/
 
 #include "deskmate.h"
@@ -41,10 +53,15 @@
 #define DM_WIFI_IF        "wlan0"
 #define DM_WIFI_AP_MAX    24
 #define DM_WIFI_STACK     65536
+#define DM_WIFI_CONN_ROUNDS    4   /* 9.5 wifi_manager retries forever; 4x5s is enough */
+#define DM_WIFI_CONN_RETRY_SEC 5
 
-/* Optional fallback AP when no saved credentials exist */
-#define DM_WIFI_AUTO_SSID "Xiaomi_0521_Wi-Fi5"
-#define DM_WIFI_AUTO_PSK  "kisslcy520"
+/* Fallback AP when no saved credentials exist.
+ * Keep empty so personal WiFi credentials are NOT hardcoded in the repository.
+ * (Users can connect once from Settings > Wi-Fi; credentials are then saved
+ *  to /data and reused for boot auto-connect.) */
+#define DM_WIFI_AUTO_SSID ""
+#define DM_WIFI_AUTO_PSK  ""
 #define DM_WIFI_SAVE_PATH "/data/deskmate_wifi.txt"
 
 static volatile int s_drv_ready;
@@ -65,6 +82,9 @@ static volatile int s_conn_busy;
 static volatile int s_scan_ready;
 static volatile int s_conn_ok;
 static volatile int s_conn_fail;
+static volatile int s_wifi_enabled = 1;
+static int s_poll_ticks;
+static volatile int s_link_lost;
 static dm_ap_t s_aps[DM_WIFI_AP_MAX];
 static int s_ap_n;
 static int s_sel = -1;
@@ -252,6 +272,142 @@ static int wifi_is_associated(char *assoc_ssid, size_t ssid_len)
 
   fclose(fp);
   return associated;
+}
+
+/* Verify the current association is really the expected SSID.
+ * Returns 1 = match, 0 = mismatch / not associated, -1 = cannot read. */
+static int wifi_verify_assoc(const char *expected)
+{
+  char assoc[33];
+
+  if (!expected || !expected[0])
+    {
+      return -1;
+    }
+  if (!wifi_is_associated(assoc, sizeof(assoc)))
+    {
+      return 0;
+    }
+  if (!assoc[0])
+    {
+      return -1;
+    }
+  return strcmp(assoc, expected) == 0 ? 1 : 0;
+}
+
+/* Port of 9.5 wifi_manager.c:get_wifi_status().
+ * 1 = associated, 0 = not associated (AP is all-zero), -1 = cannot read.
+ * "wapi show" returns early when there is no IPv4 yet, so it is only used as
+ * an EXTRA check after an address was obtained. */
+static int wifi_is_link_up(void)
+{
+  FILE *fp;
+  char buf[256];
+  int associated = 1;
+
+  (void)system("wapi show wlan0 > /tmp/wifi_status.txt 2>&1");
+  fp = fopen("/tmp/wifi_status.txt", "r");
+  if (!fp)
+    {
+      return -1;
+    }
+
+  while (fgets(buf, sizeof(buf), fp) != NULL)
+    {
+      if (strstr(buf, "AP: 00:00:00:00:00:00") != NULL)
+        {
+          associated = 0;
+          break;
+        }
+    }
+
+  fclose(fp);
+  return associated;
+}
+
+int dm_wifi_enabled(void)
+{
+  return s_wifi_enabled;
+}
+
+int dm_wifi_set_enabled(int on)
+{
+  on = on ? 1 : 0;
+  if (s_wifi_enabled == on)
+    {
+      return 0;
+    }
+
+  s_wifi_enabled = on;
+  s_link_lost = 0;
+
+  if (on)
+    {
+      s_manual_override = 0;
+      cli_sta_up();
+      syslog(LOG_INFO, "[deskmate-wifi] enabled\n");
+    }
+  else
+    {
+      s_manual_override = 1;
+      (void)system("wapi disconnect wlan0");
+      (void)system("ifdown wlan0");
+      pthread_mutex_lock(&s_lock);
+      s_cur_ssid[0] = 0;
+      s_cur_ip[0] = 0;
+      pthread_mutex_unlock(&s_lock);
+      s_conn_ok = 0;
+      s_conn_fail = 0;
+      syslog(LOG_INFO, "[deskmate-wifi] disabled\n");
+    }
+  return 0;
+}
+
+int dm_wifi_link_lost(void)
+{
+  return s_link_lost;
+}
+
+void dm_wifi_clear_link_lost(void)
+{
+  s_link_lost = 0;
+}
+
+static void wifi_mark_link_lost(void)
+{
+  pthread_mutex_lock(&s_lock);
+  s_cur_ssid[0] = 0;
+  s_cur_ip[0] = 0;
+  pthread_mutex_unlock(&s_lock);
+  s_link_lost = 1;
+  syslog(LOG_WARNING, "[deskmate-wifi] link lost\n");
+}
+
+void dm_wifi_poll(void)
+{
+  struct in_addr addr;
+
+  if (!s_wifi_enabled || !dm_wifi_connected())
+    {
+      return;
+    }
+
+  s_poll_ticks++;
+  if ((s_poll_ticks & 7) != 0)
+    {
+      return;
+    }
+
+  if (wifi_get_valid_ip(&addr) != 0)
+    {
+      wifi_mark_link_lost();
+      return;
+    }
+
+  if ((s_poll_ticks & 31) == 0 && wifi_is_link_up() == 0)
+    {
+      wifi_mark_link_lost();
+    }
 }
 
 static void wifi_cred_save(const char *ssid, const char *pass)
@@ -598,6 +754,13 @@ static void *scan_thread(void *arg)
 
   (void)arg;
 
+  if (!s_wifi_enabled)
+    {
+      s_scan_busy = 0;
+      s_scan_ready = 1;
+      return NULL;
+    }
+
   /* Wait briefly if an auto-connect thread is yielding */
   for (i = 0; i < 50 && s_conn_busy; i++)
     {
@@ -649,6 +812,11 @@ int dm_wifi_start_scan(void)
   pthread_attr_t attr;
   int ret;
 
+  if (!s_wifi_enabled)
+    {
+      return -1;
+    }
+
   if (s_scan_busy)
     {
       return 0;
@@ -683,6 +851,7 @@ static void *conn_thread(void *arg)
   char qssid[80];
   char qpass[160];
   int i;
+  int attempt;
   int got_ip = 0;
   int is_auto = s_conn_is_auto;
   struct in_addr addr;
@@ -691,6 +860,13 @@ static void *conn_thread(void *arg)
   bool try_open;
 
   (void)arg;
+
+  if (!s_wifi_enabled)
+    {
+      s_conn_busy = 0;
+      s_conn_fail = 1;
+      return NULL;
+    }
 
   strncpy(try_ssid, s_pending_ssid, sizeof(try_ssid) - 1);
   try_ssid[sizeof(try_ssid) - 1] = 0;
@@ -719,14 +895,29 @@ static void *conn_thread(void *arg)
       return NULL;
     }
 
-  /* Save credentials to /data/wifi.cfg first (compatible with 9.5 wifi_manager) */
-  if (!is_auto)
-    {
-      wifi_cred_save(try_ssid, try_pass);
-    }
+  /* NOTE: credentials are persisted only after a verified connection (below).
 
-  /* 1) ifup + STA mode */
-  cli_sta_up();
+   * 9) The 9.5 wifi_manager retries the whole sequence every 5s until it is
+   * associated. Port that behaviour here: up to DM_WIFI_CONN_ROUNDS tries. */
+  for (attempt = 0; attempt < DM_WIFI_CONN_ROUNDS; attempt++)
+    {
+      if (attempt > 0)
+        {
+          syslog(LOG_INFO, "[deskmate-wifi] retry %d/%d in %ds\n",
+                 attempt + 1, DM_WIFI_CONN_ROUNDS, DM_WIFI_CONN_RETRY_SEC);
+          sleep(DM_WIFI_CONN_RETRY_SEC);
+        }
+
+      got_ip = 0;
+
+      /* 1) ifup + STA mode */
+      cli_sta_up();
+
+  /* 1.5) Drop the previous association so switching between networks
+   *      (WPA2 <-> open) always starts from a clean driver state. */
+  syslog(LOG_INFO, "[deskmate-wifi] wapi disconnect %s\n", DM_WIFI_IF);
+  (void)system("wapi disconnect wlan0");
+  usleep(100 * 1000);
 
   /* 2) psk — WPA_ALG_CCMP = 3, WPA2 = 2 */
   if (!try_open && try_pass[0])
@@ -739,7 +930,20 @@ static void *conn_thread(void *arg)
         }
       snprintf(cmd, sizeof(cmd), "wapi psk %s %s 3 2", DM_WIFI_IF, qpass);
       syslog(LOG_INFO, "[deskmate-wifi] %s\n", cmd);
-      (void)system(cmd);
+      if (system(cmd) != 0)
+        {
+          syslog(LOG_ERR, "[deskmate-wifi] psk failed (passphrase must be 8-63 chars)\n");
+          s_conn_busy = 0;
+          s_conn_fail = 1;
+          return NULL;
+        }
+    }
+  else
+    {
+      /* Open AP: clear any leftover WPA key (alg 0 = WPA_ALG_NONE), otherwise
+       * the driver keeps the previous CCMP key and cannot join open networks. */
+      syslog(LOG_INFO, "[deskmate-wifi] open AP: clear psk\n");
+      (void)system("wapi psk wlan0 00000000 0");
     }
 
   /* 3) essid — flag 1 = connect */
@@ -751,11 +955,22 @@ static void *conn_thread(void *arg)
     }
   snprintf(cmd, sizeof(cmd), "wapi essid %s %s 1", DM_WIFI_IF, qssid);
   syslog(LOG_INFO, "[deskmate-wifi] %s\n", cmd);
-  (void)system(cmd);
+  if (system(cmd) != 0)
+    {
+      syslog(LOG_ERR, "[deskmate-wifi] essid join failed\n");
+      s_conn_busy = 0;
+      s_conn_fail = 1;
+      return NULL;
+    }
 
   /* 4) Wait for WPA2 4-way handshake / association (interruptible if auto) */
   for (i = 0; i < 25; i++)
     {
+      if (!s_wifi_enabled)
+        {
+          s_conn_busy = 0;
+          return NULL;
+        }
       if (is_auto && s_manual_override)
         {
           s_conn_busy = 0;
@@ -797,6 +1012,45 @@ static void *conn_thread(void *arg)
       sleep(1);
     }
 
+  /* Verify we are really associated with the intended SSID (an old IPv4
+   * address may still be configured while switching networks). */
+  if (got_ip)
+    {
+      int assoc = wifi_verify_assoc(try_ssid);
+      if (assoc == 0)
+        {
+          syslog(LOG_ERR,
+                 "[deskmate-wifi] associated to another SSID, treat as failure\n");
+          got_ip = 0;
+        }
+      else if (assoc < 0)
+        {
+          syslog(LOG_WARNING,
+                 "[deskmate-wifi] cannot verify ESSID, assume connected\n");
+        }
+    }
+
+      /* Ported check: "wapi show" reports AP all-zero when not associated. */
+      if (got_ip && wifi_is_link_up() == 0)
+        {
+          syslog(LOG_WARNING, "[deskmate-wifi] wapi show: not associated yet\n");
+          got_ip = 0;
+        }
+
+      if (got_ip)
+        {
+          break;
+        }
+
+      syslog(LOG_WARNING, "[deskmate-wifi] attempt %d/%d failed\n",
+             attempt + 1, DM_WIFI_CONN_ROUNDS);
+    }
+
+  if (got_ip && !s_wifi_enabled)
+    {
+      got_ip = 0;
+    }
+
   /* Fix: Only set s_cur_ssid when got_ip is true! */
   pthread_mutex_lock(&s_lock);
   if (got_ip)
@@ -816,21 +1070,22 @@ static void *conn_thread(void *arg)
   if (!got_ip)
     {
       syslog(LOG_ERR,
-             "[deskmate-wifi] connect fail: no IP after renew "
+             "[deskmate-wifi] connect fail after %d attempts "
              "(ssid=%s wlan0=%d)\n",
-             try_ssid, (int)if_nametoindex(DM_WIFI_IF));
+             DM_WIFI_CONN_ROUNDS, try_ssid,
+             (int)if_nametoindex(DM_WIFI_IF));
       s_conn_busy = 0;
-      if (!is_auto)
-        {
-          s_conn_fail = 1;
-        }
+      s_conn_fail = 1;
       return NULL;
     }
 
   syslog(LOG_INFO, "[deskmate-wifi] connected ssid=%s ip=%s\n",
          s_cur_ssid, s_cur_ip);
 
-  (void)system("wapi save_config wlan0");
+  if (system("wapi save_config wlan0") != 0)
+    {
+      syslog(LOG_WARNING, "[deskmate-wifi] wapi save_config failed\n");
+    }
   wifi_cred_save(try_ssid, try_pass);
 
   s_conn_busy = 0;
@@ -918,6 +1173,12 @@ static void *auto_thread(void *arg)
   if (wifi_cred_load(ssid, sizeof(ssid), pass, sizeof(pass)) != 0 ||
       !ssid[0])
     {
+      if (DM_WIFI_AUTO_SSID[0] == 0)
+        {
+          syslog(LOG_INFO,
+                 "[deskmate-wifi] no saved credentials; skip auto-connect\n");
+          return NULL;
+        }
       snprintf(ssid, sizeof(ssid), "%s", DM_WIFI_AUTO_SSID);
       snprintf(pass, sizeof(pass), "%s", DM_WIFI_AUTO_PSK);
     }
@@ -991,6 +1252,9 @@ static void *auto_thread(void *arg)
   return NULL;
 }
 
+/* DEPRECATED / DISABLED: boot auto-connect is no longer used.
+ * The app is manual-only now (Settings > Wi-Fi). Kept for reference or for
+ * a future opt-in, but dm_wifi_auto_start() is not called anywhere. */
 void dm_wifi_auto_start(void)
 {
   pthread_t th;
