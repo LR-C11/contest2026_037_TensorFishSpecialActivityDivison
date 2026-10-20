@@ -1,5 +1,5 @@
 /****************************************************************************
- * deskmate.h — Deskmate shared types & API
+ * deskmate.h — FlowDesk shared types & API
  ****************************************************************************/
 
 #ifndef DESKMATE_H
@@ -12,7 +12,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.14.3"
+#define DM_VER "0.16.0"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -28,6 +28,22 @@
 #define C_ACCENT 0x7DD3FC
 #define C_BLUSH  0xFF8A9A
 #define C_TEAR   0x7DD3FC
+
+/* Material Design 3 (dark) palette for Wi-Fi pages */
+#define MD_PRIMARY              0xD0BCFF
+#define MD_ON_PRIMARY           0x381E72
+#define MD_PRIMARY_CONTAINER    0x4F378B
+#define MD_ON_PRIMARY_CONTAINER 0xEADDFF
+#define MD_SECONDARY_CONTAINER  0x4A4458
+#define MD_ON_SECONDARY_CONT    0xE8DEF8
+#define MD_SURFACE              0x141218
+#define MD_SURFACE_CONTAINER    0x211F26
+#define MD_SURFACE_HIGH         0x2B2930
+#define MD_SURFACE_HIGHEST      0x36343B
+#define MD_ON_SURFACE           0xE6E0E9
+#define MD_ON_SURFACE_VARIANT   0xCAC4D0
+#define MD_OUTLINE              0x938F99
+#define MD_ERROR                0xF2B8B5
 
 #define DM_SCR_W 320
 #define DM_SCR_H 240
@@ -48,7 +64,10 @@ typedef enum {
   PAGE_NOTE_KB,
   PAGE_SETTINGS,
   PAGE_WIFI,
+  PAGE_BT_NET,
+  PAGE_APP_CONNECT,
   PAGE_WIFI_PW,
+  PAGE_WIFI_KB,
   PAGE_WIFI_CONN,
   PAGE_WIFI_DONE,
   PAGE_WORD_HOME,
@@ -238,6 +257,8 @@ int dm_health_score(void);
 void dm_create_settings(void);
 void dm_create_features(void);
 void dm_create_wifi(void);
+void dm_create_btnet(void);
+void dm_create_app_connect(void);
 void dm_create_word(void);
 void dm_create_tools(void);
 void dm_create_life(void);
@@ -250,12 +271,19 @@ void dm_life_tick(void);
 void dm_fun_tick(void);
 void dm_med_tick(void);
 void dm_wifi_tick(void);
+void dm_btnet_tick(void);
+void dm_appconn_tick(void);
 int dm_wifi_start_scan(void);
 int dm_wifi_connect(const char *ssid, const char *pass);
 void dm_wifi_auto_start(void);
 const char *dm_wifi_cur_ssid(void);
 const char *dm_wifi_cur_ip(void);
 int dm_wifi_connected(void);
+int dm_wifi_enabled(void);
+int dm_wifi_set_enabled(int on);
+void dm_wifi_poll(void);
+int dm_wifi_link_lost(void);
+void dm_wifi_clear_link_lost(void);
 int dm_wifi_ap_count(void);
 int dm_wifi_ap_get(int i, const char **ssid, int *rssi, bool *open);
 int dm_wifi_sel(void);

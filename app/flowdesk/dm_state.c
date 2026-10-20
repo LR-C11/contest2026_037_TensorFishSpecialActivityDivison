@@ -202,7 +202,8 @@ void dm_show(dm_page_t p)
       if (p == PAGE_FOCUS_RUN || p == PAGE_FOCUS_DONE || p == PAGE_MOOD_LOG ||
           p == PAGE_SUPERVISE ||
           p == PAGE_NOTE || p == PAGE_WIFI || p == PAGE_WIFI_PW ||
-          p == PAGE_WIFI_CONN || p == PAGE_WIFI_DONE ||
+          p == PAGE_WIFI_KB || p == PAGE_WIFI_CONN ||
+          p == PAGE_WIFI_DONE ||
           p == PAGE_WORD_STUDY || p == PAGE_WORD_RES ||
           p == PAGE_WORD_QUIZ || p == PAGE_WORD_WRONG ||
           p == PAGE_WORD_LIST || p == PAGE_WORD_WSET || p == PAGE_CALC ||
@@ -275,6 +276,8 @@ void dm_tick(void)
   dm_face_tick();
   dm_focus_run_tick();
   dm_wifi_tick();
+  dm_btnet_tick();
+  dm_appconn_tick();
   dm_tools_tick();
   dm_life_tick();
   dm_fun_tick();

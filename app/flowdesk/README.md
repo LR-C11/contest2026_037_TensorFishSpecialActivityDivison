@@ -1,4 +1,4 @@
-# Deskmate — Gemini-S1 桌搭伴侣（v0.8.0）
+# FlowDesk — Gemini-S1 桌搭伴侣（v0.16.0）
 
 全新应用，**未复用**参赛仓 `desk_companion` 源码。
 
@@ -11,14 +11,14 @@
 - **滚轮倒计时**：`MM:SS` 逐位上下滚动（只滚变化的数字）
 - **专注完成恭喜页**：自然归零进入；回主页 / 再来一次
 - **吃药提醒**：列表 + 添加；每天次数 1/2/3 分段；独立拼音/英文键盘
-- **WiFi**：开机自动连 `Xiaomi_0521_Wi-Fi5`（可改）；设定页仍可手动扫描连接
+- **WiFi**：**不再开机自动连接**；设定页手动扫描 / 输入密码连接（连接逻辑移植 9.5 demo 的 wifi_manager：多轮重试 + `wapi show` 状态校验）
 - **工具/背单词/喝水/吃药/备忘** 等功能页
 - **底栏**：专注 / 聊天 / 健康 / 功能 / 设定（子页隐藏底栏）
 
 ## 目录
 
 ```
-vendor/allwinnertech/apps/deskmate/
+vendor/allwinnertech/apps/flowdesk/
   deskmate.h
   deskmate_main.c
   dm_state.c
@@ -46,7 +46,7 @@ cd /home/lrc/vela
 ./build.sh vendor/allwinnertech/boards/r528/r528s3-gemini-s1/configs/nsh_minidisplay/ -j8
 
 strings nuttx/vela.bin | grep Deskmate
-# 期望: Deskmate 0.8.0
+# 期望: FlowDesk 0.16.0
 ```
 
 打包（记得手动拷贝，否则可能是旧固件）：
@@ -65,7 +65,7 @@ killall luncher_mini
 deskmate &
 ```
 
-日志应出现：`Deskmate 0.1.0 focus-home`
+日志应出现：`FlowDesk 0.16.0 focus-home`
 
 ## 配置
 

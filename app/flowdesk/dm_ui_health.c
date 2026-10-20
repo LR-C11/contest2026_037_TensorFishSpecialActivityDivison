@@ -595,9 +595,9 @@ static int mood_score_from_recs(const dm_mood_rec_t *recs, int n)
 
   final = (wsum > 0.0f) ? (acc / wsum) : 50.0f;
 
-  /* stability: last up to 5 records in list order (index 0..min(n,5)-1 = newest first in Deskmate)
+  /* stability: last up to 5 records in list order (index 0..min(n,5)-1 = newest first in FlowDesk)
    * App used slice(-5) oldest-of-recent on their list order.
-   * Deskmate stores newest at [0]; use up to 5 newest = list[0..m-1]. */
+   * FlowDesk stores newest at [0]; use up to 5 newest = list[0..m-1]. */
   if (n >= 3)
     {
       int m = n < 5 ? n : 5;

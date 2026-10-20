@@ -17,7 +17,7 @@ if DESKMATE_APP
 
 config DESKMATE_APP_PROGNAME
 	string "Program name"
-	default "deskmate"
+	default "flowdesk"
 
 config DESKMATE_APP_PRIORITY
 	int "Deskmate task priority"
