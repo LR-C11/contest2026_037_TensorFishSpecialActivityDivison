@@ -13,8 +13,8 @@
 
 /* MiMo OpenAI-compatible endpoint (user-provided key for this device). */
 #define MIMO_BASE "https://token-plan-sgp.xiaomimimo.com/v1"
-#define MIMO_KEY  "YOUR_MIMO_API_KEY"
-#define MIMO_MODEL "mimo-v2.5-pro"
+#define MIMO_KEY  "tp-s4ivq5cxzz7uke2mh9ms0bqzzci2oartptn4wm3b7608ukon"
+#define MIMO_MODEL "mimo-v2.6-flash"
 #define CHAT_REQ_PATH "/tmp/dm_chat_req.json"
 #define CHAT_RSP_PATH "/tmp/dm_chat_rsp.json"
 #define CHAT_MAX_REPLY 240
@@ -309,6 +309,61 @@ const char *dm_chat_ai_ask(const char *user_text)
 const char *dm_chat_local_reply(const char *user_text)
 {
   return local_reply(user_text);
+}
+
+
+/* ---- dictionary AI definition ---- */
+int dm_dict_ai_define(const char *word, char *out, int cap)
+{
+  char esc[96];
+  char body[700];
+  char cmd[1100];
+  FILE *f;
+  int n;
+
+  if (!word || !word[0] || !out || cap < 8)
+    {
+      return -1;
+    }
+  out[0] = '\0';
+  if (!dm_wifi_connected())
+    {
+      return -1;
+    }
+  if (json_escape(word, esc, sizeof(esc)) < 0)
+    {
+      return -1;
+    }
+  n = snprintf(body, sizeof(body),
+               "{\"model\":\"%s\",\"messages\":["
+               "{\"role\":\"system\",\"content\":\"你是专业词典助手，用中文简洁解释单词，不超过100字。\"},"
+               "{\"role\":\"user\",\"content\":\"解释单词 %s：词性、常见释义、一个例句。\"}],"
+               "\"temperature\":0.3,\"max_tokens\":180}",
+               MIMO_MODEL, esc);
+  if (n <= 0 || n >= (int)sizeof(body))
+    {
+      return -1;
+    }
+  f = fopen(CHAT_REQ_PATH, "w");
+  if (!f)
+    {
+      return -1;
+    }
+  fwrite(body, 1, (size_t)n, f);
+  fclose(f);
+  unlink(CHAT_RSP_PATH);
+  snprintf(cmd, sizeof(cmd),
+           "curl -sS -m 18 -X POST \"%s/chat/completions\" "
+           "-H \"Authorization: Bearer %s\" "
+           "-H \"Content-Type: application/json\" "
+           "-d @%s -o %s",
+           MIMO_BASE, MIMO_KEY, CHAT_REQ_PATH, CHAT_RSP_PATH);
+  if (system(cmd) != 0)
+    {
+      return -1;
+    }
+  extract_content(CHAT_RSP_PATH, out, (size_t)cap);
+  return out[0] ? 0 : -1;
 }
 
 #endif /* CONFIG_DESKMATE_APP */

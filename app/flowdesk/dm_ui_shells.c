@@ -99,6 +99,8 @@ void dm_create_features(void)
   static const fn_entry_t entries[] = {
     /* 监督 Supervise hidden from menu */
     { "备忘", "Notes", "帮你记一下东西", "Remember things", PAGE_NOTE },
+    { "词典", "Dictionary", "查词 / 每日一词 / AI 释义",
+      "Lookup / daily / AI", PAGE_DICT },
     { "背单词", "Word Memo", "学习 / 复习 / 测验 / 错题",
       "Study / quiz / wrong", PAGE_WORD_HOME },
     { "计算器", "Calc", "四则运算", "Four operations", PAGE_CALC },
@@ -205,7 +207,8 @@ void dm_dock_highlight(dm_page_t p)
            p == PAGE_24 || p == PAGE_DRAW || p == PAGE_BMI || p == PAGE_MED ||
            p == PAGE_MED_ADD || p == PAGE_MED_KB || p == PAGE_2048 ||
            p == PAGE_MBTI || p == PAGE_MBTI_Q || p == PAGE_MBTI_RESULT ||
-           p == PAGE_NOTE_ADD || p == PAGE_NOTE_KB)
+           p == PAGE_NOTE_ADD || p == PAGE_NOTE_KB ||
+           p == PAGE_DICT || p == PAGE_DICT_SEARCH || p == PAGE_DICT_DETAIL)
     {
       focus_key = PAGE_FEATURES;
     }

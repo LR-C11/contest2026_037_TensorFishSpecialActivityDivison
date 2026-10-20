@@ -1,4 +1,4 @@
-# FlowDesk — Gemini-S1 桌搭伴侣（v0.16.0）
+# FlowDesk — Gemini-S1 桌搭伴侣（v0.14.5）
 
 全新应用，**未复用**参赛仓 `desk_companion` 源码。
 
@@ -18,7 +18,7 @@
 ## 目录
 
 ```
-vendor/allwinnertech/apps/flowdesk/
+vendor/allwinnertech/apps/deskmate/
   deskmate.h
   deskmate_main.c
   dm_state.c
@@ -46,7 +46,7 @@ cd /home/lrc/vela
 ./build.sh vendor/allwinnertech/boards/r528/r528s3-gemini-s1/configs/nsh_minidisplay/ -j8
 
 strings nuttx/vela.bin | grep Deskmate
-# 期望: FlowDesk 0.16.0
+# 期望: FlowDesk 0.14.5
 ```
 
 打包（记得手动拷贝，否则可能是旧固件）：
@@ -65,7 +65,7 @@ killall luncher_mini
 deskmate &
 ```
 
-日志应出现：`FlowDesk 0.16.0 focus-home`
+日志应出现：`FlowDesk 0.14.5 focus-home`
 
 ## 配置
 
