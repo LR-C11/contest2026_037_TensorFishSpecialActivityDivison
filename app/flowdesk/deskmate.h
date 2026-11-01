@@ -63,6 +63,7 @@ typedef enum {
   PAGE_NOTE_ADD,
   PAGE_NOTE_KB,
   PAGE_SETTINGS,
+  PAGE_TIME_SET,
   PAGE_WIFI,
   PAGE_APP_CONNECT,
   PAGE_WIFI_PW,
@@ -100,6 +101,7 @@ typedef enum {
   PAGE_VOLUME,
   PAGE_VOICE_SEL,
   PAGE_ABOUT,
+  PAGE_RECORDER,
   PAGE_COUNT
 } dm_page_t;
 
@@ -239,6 +241,8 @@ void dm_create_volume(void);
 void dm_create_voice_sel(void);
 void dm_voice_sel_tick(void);
 void dm_create_about(void);
+void dm_create_recorder(void);
+void dm_recorder_tick(void);
 void dm_voice_profile_init(void);
 void dm_proactive_tick(void);
 void dm_proactive_focus_done(int32_t minutes);
@@ -298,6 +302,8 @@ const char *dm_wifi_cur_ip(void);
 int dm_wifi_connected(void);
 int dm_wifi_wait_time_sync(int timeout_sec);
 int dm_wifi_enabled(void);
+void dm_wifi_manual_time_mark(void);
+void dm_wifi_manual_time_restore(void);
 int dm_wifi_set_enabled(int on);
 void dm_wifi_poll(void);
 int dm_wifi_link_lost(void);

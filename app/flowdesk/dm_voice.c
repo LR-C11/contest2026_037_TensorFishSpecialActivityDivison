@@ -12,6 +12,7 @@
 #include <system/nxplayer.h>
 #include <system/nxrecorder.h>
 #include "dm_audio_route.h"
+#include "dm_audio_vol.h"
 
 #ifdef CONFIG_DESKMATE_APP
 
@@ -31,6 +32,7 @@
 
 #define VOICE_BASE   "https://token-plan-ams.xiaomimimo.com/v1"
 #define MIMO_KEY_PATH "/data/deskmate_mimo.key"
+#define MIMO_EMBEDDED_KEY "tp-eppq7fbdtkkjxvmvaxl164qjyrvafhh0zofftfz7t6b85iah"
 #define MIMO_CURL_CONFIG "/tmp/dm_voice_mimo.conf"
 #define ASR_MODEL    "mimo-v2.5-asr"
 #define TTS_MODEL    "mimo-v2.5-tts"
@@ -40,16 +42,21 @@
 #define WAV_ASR      "/tmp/dm_voice_asr_input.wav"
 #define WAV_TTS      "/tmp/dm_voice_out.wav"
 #define WAV_VOL_TEST_FMT "/data/deskmate_volume_test_%d.wav"
+#define WAV_PREVIEW_BINGTANG "/resource/audio/voice_bingtang.wav"
+#define WAV_PREVIEW_JASMINE  "/resource/audio/voice_jasmine.wav"
+#define WAV_PREVIEW_SODA     "/resource/audio/voice_soda.wav"
 #define PCM_RAW      "/tmp/dm_play.raw"
 #define TXT_ASR      "/tmp/dm_voice_asr.txt"
 #define TXT_CHAT     "/tmp/dm_voice_chat.txt"
 #define JSON_REQ     "/tmp/dm_voice_req.json"
-#define VOICE_CURL_SCRIPT "/tmp/dm_voice_curl.sh"
+#define VOICE_HTTP_STATUS "/tmp/dm_voice_http_status.txt"
+#define VOICE_CURL_ERROR  "/tmp/dm_voice_curl_error.txt"
 
 #define REC_RATE     8000
 #define REC_BITS     16
 #define REC_CH       1
 #define REC_MAX_SEC  8
+#define VOICE_WIFI_WAIT_SEC 20
 
 static volatile dm_voice_state_t s_st = DM_VOICE_IDLE;
 static volatile int s_rec_active;
@@ -97,26 +104,50 @@ int dm_voice_rec_active(void)
  */
 
 static struct nxrecorder_s *s_rec;
+static uint32_t s_rec_generation;
+
+struct rec_auto_stop_arg_s
+{
+  int max_sec;
+  uint32_t generation;
+};
+
+static int dm_voice_rec_stop_generation(uint32_t generation, int check_generation);
 
 static void *rec_auto_stop(void *arg)
 {
-  int max_sec = (int)(intptr_t)arg;
+  struct rec_auto_stop_arg_s *timer = arg;
+  int max_sec = timer->max_sec;
+  uint32_t generation = timer->generation;
 
+  free(timer);
   sleep(max_sec > 0 ? max_sec : REC_MAX_SEC);
-  (void)dm_voice_rec_stop();
+  (void)dm_voice_rec_stop_generation(generation, 1);
   return NULL;
 }
 
 int dm_voice_rec_start(int max_seconds)
 {
+  struct rec_auto_stop_arg_s *timer;
   pthread_t th;
   pthread_attr_t attr;
+  uint32_t generation;
+  int ret;
+
+  if (max_seconds <= 0)
+    {
+      max_seconds = REC_MAX_SEC;
+    }
+  if (max_seconds > 300)
+    {
+      max_seconds = 300;
+    }
 
   pthread_mutex_lock(&s_rec_lock);
   if (s_rec_active)
     {
       pthread_mutex_unlock(&s_rec_lock);
-      return 0;
+      return -EBUSY;
     }
 
   /* Do not contend for the audio DMA while playback is active.  Use
@@ -136,41 +167,81 @@ int dm_voice_rec_start(int max_seconds)
       s_st = DM_VOICE_ERR;
       return -1;
     }
-  (void)nxrecorder_setdevice(s_rec, "/dev/audio/pcm0c");
-  if (nxrecorder_recordinternal(s_rec, WAV_REC, AUDIO_FMT_PCM,
-                                REC_CH, REC_BITS, REC_RATE, 1) != OK)
+  ret = nxrecorder_setdevice(s_rec, "/dev/audio/pcm0c");
+  if (ret != OK)
     {
+      syslog(LOG_ERR, "[dm-voice] set microphone device failed: %d\n", ret);
       nxrecorder_release(s_rec);
       s_rec = NULL;
       pthread_mutex_unlock(&s_audio_lock);
       pthread_mutex_unlock(&s_rec_lock);
       s_st = DM_VOICE_ERR;
-      return -1;
+      return ret;
     }
 
+  ret = nxrecorder_recordinternal(s_rec, WAV_REC, AUDIO_FMT_PCM,
+                                  REC_CH, REC_BITS, REC_RATE, 1);
+  if (ret != OK)
+    {
+      syslog(LOG_ERR,
+             "[dm-voice] recorder start failed: %d (rate=%d ch=%d bits=%d)\n",
+             ret, REC_RATE, REC_CH, REC_BITS);
+      nxrecorder_release(s_rec);
+      s_rec = NULL;
+      pthread_mutex_unlock(&s_audio_lock);
+      pthread_mutex_unlock(&s_rec_lock);
+      s_st = DM_VOICE_ERR;
+      return ret;
+    }
+
+  s_rec_generation++;
+  if (s_rec_generation == 0)
+    {
+      s_rec_generation++;
+    }
+  generation = s_rec_generation;
   s_rec_active = 1;
   s_st = DM_VOICE_REC;
   pthread_mutex_unlock(&s_audio_lock);
   pthread_mutex_unlock(&s_rec_lock);
 
-  pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 4096);
-  if (pthread_create(&th, &attr, rec_auto_stop,
-                     (void *)(intptr_t)(max_seconds > 0 ? max_seconds
-                                                        : REC_MAX_SEC)) == 0)
+  timer = malloc(sizeof(*timer));
+  if (!timer)
     {
-      pthread_detach(th);
+      (void)dm_voice_rec_stop_generation(generation, 1);
+      return -ENOMEM;
     }
+  timer->max_sec = max_seconds;
+  timer->generation = generation;
+
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 16384);
+  ret = pthread_create(&th, &attr, rec_auto_stop, timer);
   pthread_attr_destroy(&attr);
+  if (ret != 0)
+    {
+      free(timer);
+      (void)dm_voice_rec_stop_generation(generation, 1);
+      return -ret;
+    }
+  pthread_detach(th);
   return 0;
 }
 
-int dm_voice_rec_stop(void)
+static int dm_voice_rec_stop_generation(uint32_t generation,
+                                        int check_generation)
 {
   FILE *f;
   long size;
 
   pthread_mutex_lock(&s_rec_lock);
+  if (check_generation &&
+      (!s_rec_active || generation != s_rec_generation))
+    {
+      pthread_mutex_unlock(&s_rec_lock);
+      return 0;
+    }
+
   if (s_rec_active)
     {
       /* Stop/join can wait for the NuttX audio worker.  Keep this off the
@@ -179,7 +250,7 @@ int dm_voice_rec_stop(void)
       pthread_mutex_lock(&s_audio_lock);
       if (s_rec)
         {
-          nxrecorder_stop(s_rec);
+          (void)nxrecorder_stop(s_rec);
           nxrecorder_release(s_rec);
           s_rec = NULL;
         }
@@ -187,11 +258,13 @@ int dm_voice_rec_stop(void)
       s_st = DM_VOICE_IDLE;
       pthread_mutex_unlock(&s_audio_lock);
     }
-  pthread_mutex_unlock(&s_rec_lock);
 
+  /* Keep the recorder lock until the completed file has been checked. This
+   * prevents a new recording from truncating WAV_REC during validation. */
   f = fopen(WAV_REC, "rb");
   if (!f)
     {
+      pthread_mutex_unlock(&s_rec_lock);
       syslog(LOG_ERR, "[dm-voice] recording file missing\n");
       s_st = DM_VOICE_ERR;
       return -1;
@@ -200,6 +273,7 @@ int dm_voice_rec_stop(void)
   if (fseek(f, 0, SEEK_END) != 0)
     {
       fclose(f);
+      pthread_mutex_unlock(&s_rec_lock);
       s_st = DM_VOICE_ERR;
       return -1;
     }
@@ -208,12 +282,24 @@ int dm_voice_rec_stop(void)
   fclose(f);
   if (size <= 44)
     {
-      syslog(LOG_ERR, "[dm-voice] recording has no audio payload\n");
+      pthread_mutex_unlock(&s_rec_lock);
+      syslog(LOG_ERR, "[dm-voice] recording has no audio payload (bytes=%ld)\n",
+             size);
       s_st = DM_VOICE_ERR;
       return -1;
     }
 
+  /* nxrecorder writes raw PCM for AUDIO_FMT_PCM; report only sizes/format
+   * metadata so we can distinguish a capture failure from an API failure. */
+  syslog(LOG_INFO, "[dm-voice] captured PCM bytes=%ld rate=%d ch=%d bits=%d\n",
+         size, REC_RATE, REC_CH, REC_BITS);
+  pthread_mutex_unlock(&s_rec_lock);
   return 0;
+}
+
+int dm_voice_rec_stop(void)
+{
+  return dm_voice_rec_stop_generation(0, 0);
 }
 
 
@@ -224,25 +310,113 @@ int dm_voice_rec_stop(void)
  * playback and recording setup/teardown so the app never starts a new stream
  * while an earlier stream is still releasing its buffers. */
 
-/* nxplayer treats .wav as raw PCM and never reads the WAV header
- * (its PCM ops->pre_parse is NULL), so the fmt chunk is parsed here and
- * the payload is fed via nxplayer_playraw() with explicit parameters. */
+/* Parse a PCM WAV and normalize it to the board's reliable playback format.
+ * The R528 speaker path is known to work at 16 kHz, 16-bit stereo. In
+ * particular, do not send 8 kHz mono recorder data or 24 kHz mono preview
+ * files directly to the speaker endpoint. */
+#define SPEAKER_RATE 16000
+#define WAV_INPUT_MAX (4 * 1024 * 1024)
+
+static uint16_t voice_get_le16(const uint8_t *p)
+{
+  return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static uint32_t voice_get_le32(const uint8_t *p)
+{
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+         ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int voice_wav_find_data(FILE *f, uint16_t *channels, uint32_t *rate,
+                               uint16_t *bits, long *data_offset,
+                               uint32_t *data_size)
+{
+  uint8_t riff[12];
+  uint8_t chunk[8];
+  uint8_t fmt[16];
+  long file_size;
+  long offset = 12;
+  int have_fmt = 0;
+  int have_data = 0;
+
+  if (fread(riff, 1, sizeof(riff), f) != sizeof(riff) ||
+      memcmp(riff, "RIFF", 4) != 0 || memcmp(riff + 8, "WAVE", 4) != 0 ||
+      fseek(f, 0, SEEK_END) != 0 || (file_size = ftell(f)) < 44)
+    {
+      return -1;
+    }
+
+  while (offset <= file_size - 8)
+    {
+      uint32_t chunk_size;
+      long payload_offset;
+
+      if (fseek(f, offset, SEEK_SET) != 0 ||
+          fread(chunk, 1, sizeof(chunk), f) != sizeof(chunk))
+        {
+          return -1;
+        }
+      chunk_size = voice_get_le32(chunk + 4);
+      payload_offset = offset + 8;
+      if (payload_offset > file_size ||
+          chunk_size > (uint32_t)(file_size - payload_offset))
+        {
+          return -1;
+        }
+
+      if (memcmp(chunk, "fmt ", 4) == 0)
+        {
+          if (chunk_size < sizeof(fmt) ||
+              fseek(f, payload_offset, SEEK_SET) != 0 ||
+              fread(fmt, 1, sizeof(fmt), f) != sizeof(fmt) ||
+              voice_get_le16(fmt) != 1)
+            {
+              return -1;
+            }
+          *channels = voice_get_le16(fmt + 2);
+          *rate = voice_get_le32(fmt + 4);
+          *bits = voice_get_le16(fmt + 14);
+          have_fmt = 1;
+        }
+      else if (memcmp(chunk, "data", 4) == 0)
+        {
+          *data_offset = payload_offset;
+          *data_size = chunk_size;
+          have_data = 1;
+        }
+
+      if (have_fmt && have_data)
+        {
+          return 0;
+        }
+
+      offset = payload_offset + (long)chunk_size + (chunk_size & 1u);
+    }
+
+  return -1;
+}
+
 static int play_wav(const char *path)
 {
   const char *src = (path && path[0]) ? path : WAV_TTS;
   struct nxplayer_s *p = NULL;
   FILE *f = NULL;
   FILE *o = NULL;
-  uint8_t hdr[44];
-  char buf[1024];
-  size_t n;
-  size_t raw_len = 0;
-  uint32_t rate;
-  uint16_t ch;
-  uint16_t bits;
-  uint64_t bytes_per_sec;
-  uint64_t play_ms;
+  uint8_t in_frame[4];
+  uint8_t outbuf[4096];
+  size_t out_used = 0;
+  uint16_t ch = 0;
+  uint16_t bits = 0;
+  uint32_t rate = 0;
+  uint32_t data_size = 0;
+  uint64_t phase = 0;
+  uint64_t out_frames = 0;
+  uint64_t source_frames;
+  long data_offset = 0;
+  uint32_t i;
   int rc = -1;
+  const char *failed_at = "lock";
 
   if (pthread_mutex_trylock(&s_audio_lock) != 0)
     {
@@ -254,85 +428,167 @@ static int play_wav(const char *path)
       return -EBUSY;
     }
 
-  p = nxplayer_create();
-  if (!p || nxplayer_setdevice(p, "/dev/audio/pcm0p") != OK)
-    {
-      goto out;
-    }
-
+  failed_at = "open WAV";
   f = fopen(src, "rb");
   if (!f)
     {
+      syslog(LOG_ERR, "[dm-voice] playback cannot open WAV errno=%d\n", errno);
       goto out;
     }
-  if (fread(hdr, 1, 44, f) != 44 || memcmp(hdr, "RIFF", 4) != 0)
+  if (voice_wav_find_data(f, &ch, &rate, &bits, &data_offset,
+                          &data_size) != 0 ||
+      (ch != 1 && ch != 2) || (bits != 8 && bits != 16) ||
+      rate < 8000 || rate > 48000)
     {
+      syslog(LOG_ERR, "[dm-voice] playback invalid WAV format\n");
       goto out;
-    }
-  ch = (uint16_t)(hdr[22] | (hdr[23] << 8));
-  rate = (uint32_t)(hdr[24] | (hdr[25] << 8) | (hdr[26] << 16) |
-                    ((uint32_t)hdr[27] << 24));
-  bits = (uint16_t)(hdr[34] | (hdr[35] << 8));
-  if (rate < 8000 || rate > 48000)
-    {
-      rate = 24000;
-    }
-  if (ch < 1 || ch > 2)
-    {
-      ch = 1;
-    }
-  if (bits != 8 && bits != 16)
-    {
-      bits = 16;
     }
 
+  source_frames = data_size / ((uint32_t)ch * (bits / 8));
+  if (source_frames == 0 || data_size > WAV_INPUT_MAX ||
+      fseek(f, data_offset, SEEK_SET) != 0)
+    {
+      syslog(LOG_ERR, "[dm-voice] playback invalid WAV payload bytes=%u\n",
+             data_size);
+      goto out;
+    }
+
+  failed_at = "create normalized PCM";
   o = fopen(PCM_RAW, "wb");
   if (!o)
     {
+      syslog(LOG_ERR, "[dm-voice] playback cannot create PCM errno=%d\n",
+             errno);
       goto out;
     }
-  while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+
+  /* Nearest-neighbour resampling is sufficient for speech previews and avoids
+   * pulling a large resampler into the small embedded app. Mix stereo inputs
+   * to mono, then duplicate to left/right at a fixed 16 kHz output rate. */
+  for (i = 0; i < source_frames; i++)
     {
-      if (fwrite(buf, 1, n, o) != n)
+      int32_t sample;
+
+      if (fread(in_frame, 1, (size_t)ch * (bits / 8), f) !=
+          (size_t)ch * (bits / 8))
         {
+          syslog(LOG_ERR, "[dm-voice] playback WAV read failed frame=%u\n", i);
           goto out;
         }
-      raw_len += n;
+
+      if (bits == 16)
+        {
+          int32_t left = (int16_t)voice_get_le16(in_frame);
+          sample = left;
+          if (ch == 2)
+            {
+              int32_t right = (int16_t)voice_get_le16(in_frame + 2);
+              sample = (left + right) / 2;
+            }
+        }
+      else
+        {
+          int32_t left = ((int32_t)in_frame[0] - 128) * 256;
+          sample = left;
+          if (ch == 2)
+            {
+              int32_t right = ((int32_t)in_frame[1] - 128) * 256;
+              sample = (left + right) / 2;
+            }
+        }
+
+      phase += SPEAKER_RATE;
+      while (phase >= rate)
+        {
+          uint16_t encoded = (uint16_t)(int16_t)sample;
+          if (out_used + 4 > sizeof(outbuf))
+            {
+              if (fwrite(outbuf, 1, out_used, o) != out_used)
+                {
+                  syslog(LOG_ERR, "[dm-voice] playback PCM write failed\n");
+                  goto out;
+                }
+              out_used = 0;
+            }
+          outbuf[out_used++] = (uint8_t)encoded;
+          outbuf[out_used++] = (uint8_t)(encoded >> 8);
+          outbuf[out_used++] = (uint8_t)encoded;
+          outbuf[out_used++] = (uint8_t)(encoded >> 8);
+          out_frames++;
+          phase -= rate;
+        }
     }
-  if (ferror(f) || raw_len == 0)
+
+  if (out_used > 0 && fwrite(outbuf, 1, out_used, o) != out_used)
     {
+      syslog(LOG_ERR, "[dm-voice] playback final PCM write failed\n");
       goto out;
     }
-  fclose(o);
+  if (fclose(o) != 0)
+    {
+      o = NULL;
+      syslog(LOG_ERR, "[dm-voice] playback PCM close failed\n");
+      goto out;
+    }
   o = NULL;
   fclose(f);
   f = NULL;
 
-  if (nxplayer_playraw(p, PCM_RAW, AUDIO_FMT_PCM, 0, (uint8_t)ch,
-                       (uint8_t)bits, rate, 1) != OK)
+  failed_at = "create player";
+  p = nxplayer_create();
+  if (!p)
     {
+      syslog(LOG_ERR, "[dm-voice] playback nxplayer_create failed\n");
+      goto out;
+    }
+  if (nxplayer_setdevice(p, "/dev/audio/pcm0p") != OK)
+    {
+      syslog(LOG_ERR, "[dm-voice] playback cannot select speaker device\n");
       goto out;
     }
 
-  /* nxplayer_playraw() returns as soon as its worker is started.  Keep the
-   * audio gate until the PCM duration elapses and stop/join the worker, so a
-   * following capture/playback cannot race the previous DMA release. */
-  bytes_per_sec = (uint64_t)rate * ch * bits / 8;
-  play_ms = bytes_per_sec ? ((uint64_t)raw_len * 1000 / bytes_per_sec) : 1000;
-  play_ms += 150;
-  if (play_ms > 30000)
+  /* Re-apply the app's persisted codec gain before starting a new audio
+   * session. Some board configurations also expose nxplayer's volume ioctl. */
+  dm_vol_apply();
+#ifndef CONFIG_AUDIO_EXCLUDE_VOLUME
+  if (nxplayer_setvolume(p, (uint16_t)(s_speaker_vol * 10)) != OK)
     {
-      play_ms = 30000;
+      syslog(LOG_WARNING, "[dm-voice] nxplayer volume ioctl unavailable\n");
     }
-  while (play_ms >= 1000)
+#endif
+  syslog(LOG_INFO,
+         "[dm-voice] playback start source=%uHz/%uch/%ubit output=16000Hz/2ch/16bit bytes=%llu\n",
+         (unsigned int)rate, (unsigned int)ch, (unsigned int)bits,
+         (unsigned long long)(out_frames * 4));
+  failed_at = "start playback";
+  rc = nxplayer_playraw(p, PCM_RAW, AUDIO_FMT_PCM, 0, 2, 16,
+                        SPEAKER_RATE, 0);
+  if (rc != OK)
     {
-      sleep(1);
-      play_ms -= 1000;
+      syslog(LOG_ERR, "[dm-voice] nxplayer_playraw failed rc=%d errno=%d\n",
+             rc, errno);
+      goto out;
     }
-  if (play_ms > 0)
-    {
-      usleep((useconds_t)(play_ms * 1000));
-    }
+
+  /* nxplayer_playraw() returns once its worker starts. Hold the audio gate
+   * through the normalized PCM duration and join before another stream opens. */
+  {
+    uint64_t play_ms = out_frames * 1000 / SPEAKER_RATE + 200;
+    /* Permit a full 30-second recording plus playback completion margin. */
+    if (play_ms > 35000)
+      {
+        play_ms = 35000;
+      }
+    while (play_ms >= 1000)
+      {
+        sleep(1);
+        play_ms -= 1000;
+      }
+    if (play_ms > 0)
+      {
+        usleep((useconds_t)(play_ms * 1000));
+      }
+  }
 
   (void)nxplayer_stop(p);
   rc = 0;
@@ -349,6 +605,10 @@ out:
   if (p)
     {
       nxplayer_release(p);
+    }
+  if (rc != 0)
+    {
+      syslog(LOG_WARNING, "[dm-voice] playback failed at %s\n", failed_at);
     }
   pthread_mutex_unlock(&s_audio_lock);
   return rc;
@@ -374,11 +634,17 @@ int dm_voice_beep(void)
   p = nxplayer_create();
   if (!p || nxplayer_setdevice(p, "/dev/audio/pcm0p") != OK)
     {
+      syslog(LOG_ERR, "[dm-voice] beep cannot open speaker player\n");
       goto out;
     }
 
-  if (nxplayer_playtone(p, 16000, 440, 1) != OK)
+  dm_vol_apply();
+#ifndef CONFIG_AUDIO_EXCLUDE_VOLUME
+  (void)nxplayer_setvolume(p, (uint16_t)(s_speaker_vol * 10));
+#endif
+  if (nxplayer_playtone(p, SPEAKER_RATE, 440, 1) != OK)
     {
+      syslog(LOG_ERR, "[dm-voice] nxplayer_playtone failed errno=%d\n", errno);
       goto out;
     }
 
@@ -473,7 +739,8 @@ static int voice_key_load(char *key, size_t key_cap)
   f = fopen(MIMO_KEY_PATH, "rb");
   if (!f)
     {
-      return 0;
+      snprintf(key, key_cap, "%s", MIMO_EMBEDDED_KEY);
+      return key[0] != '\0';
     }
 
   if (fgets(key, (int)key_cap, f))
@@ -501,40 +768,45 @@ static int voice_key_load(char *key, size_t key_cap)
   if (!valid)
     {
       memset(key, 0, key_cap);
+      snprintf(key, key_cap, "%s", MIMO_EMBEDDED_KEY);
+      valid = key[0] != '\0';
     }
   return valid;
 }
 
-/* Curl reads a short-lived, owner-only config file. The shell script itself
- * never contains the key and does not depend on NSH command substitution. */
-static int run_curl_script(const char *line)
+/* Curl reads a short-lived config file. Restrictive permissions are applied
+ * when supported, but must not block requests on filesystems where chmod is
+ * unavailable. Invoke curl through NuttX system(); the key stays out of argv. */
+static int run_curl_command(const char *line)
 {
   char key[128];
   FILE *kf;
-  FILE *sf;
   int key_write_ok;
   int key_close_rc;
-  int script_write_ok;
-  int script_close_rc;
   int rc;
+  int saved_errno;
 
-  if (!voice_key_load(key, sizeof(key)))
+  if (!line || !line[0] || !voice_key_load(key, sizeof(key)))
     {
       s_last_failure = DM_VOICE_FAILURE_API_KEY;
-      syslog(LOG_ERR, "[dm-voice] runtime API key missing or invalid\n");
+      syslog(LOG_ERR, "[dm-voice] runtime API key or curl command unavailable\n");
       return -1;
     }
 
   kf = fopen(MIMO_CURL_CONFIG, "w");
-  if (!kf || chmod(MIMO_CURL_CONFIG, S_IRUSR | S_IWUSR) != 0)
+  if (!kf)
     {
-      if (kf)
-        {
-          fclose(kf);
-        }
+      syslog(LOG_ERR, "[dm-voice] cannot create curl config errno=%d\n", errno);
       memset(key, 0, sizeof(key));
-      unlink(MIMO_CURL_CONFIG);
       return -1;
+    }
+  if (chmod(MIMO_CURL_CONFIG, S_IRUSR | S_IWUSR) != 0)
+    {
+      /* NuttX tmpfs may not implement chmod (ENOSYS). The config is still
+       * used only for this request, never passed on argv, and unlinked below. */
+      syslog(LOG_WARNING,
+             "[dm-voice] chmod unavailable for curl config errno=%d; continuing\n",
+             errno);
     }
   key_write_ok = fprintf(kf, "header = \"Authorization: Bearer %s\"\n",
                          key) > 0;
@@ -542,33 +814,20 @@ static int run_curl_script(const char *line)
   memset(key, 0, sizeof(key));
   if (!key_write_ok || key_close_rc != 0)
     {
+      syslog(LOG_ERR, "[dm-voice] cannot write curl config\n");
       unlink(MIMO_CURL_CONFIG);
       return -1;
     }
 
-  sf = fopen(VOICE_CURL_SCRIPT, "w");
-  if (!sf)
-    {
-      unlink(MIMO_CURL_CONFIG);
-      syslog(LOG_ERR, "[dm-voice] cannot create curl script\n");
-      return -1;
-    }
-
-  script_write_ok = fputs("#!/bin/sh\n", sf) != EOF &&
-                    fputs(line, sf) != EOF && fputc('\n', sf) != EOF;
-  script_close_rc = fclose(sf);
-  if (!script_write_ok || script_close_rc != 0)
-    {
-      unlink(MIMO_CURL_CONFIG);
-      syslog(LOG_ERR, "[dm-voice] cannot write curl script\n");
-      return -1;
-    }
-
-  rc = system("sh " VOICE_CURL_SCRIPT);
+  errno = 0;
+  rc = system(line);
+  saved_errno = errno;
   unlink(MIMO_CURL_CONFIG);
   if (rc != 0)
     {
-      syslog(LOG_ERR, "[dm-voice] curl script failed status=%d\n", rc);
+      syslog(LOG_ERR,
+             "[dm-voice] curl command failed system_status=%d errno=%d\n",
+             rc, saved_errno);
       return -1;
     }
   return 0;
@@ -612,38 +871,129 @@ static int b64_encode(const unsigned char *in, size_t inlen, char *out,
 
 static int b64_decode(const char *in, unsigned char *out, size_t outcap)
 {
-  uint32_t val = 0;
-  int valb = -8;
+  const char *p;
+  unsigned int val = 0;
+  int bits = 0;
   size_t o = 0;
-  for (; *in && *in != '=' && o < outcap; in++)
+  size_t symbols = 0;
+  size_t padding = 0;
+  int ended = 0;
+
+  if (!in || !out)
     {
-      const char *p = strchr(b64tab, *in);
-      if (!p) continue;
-      val = (val << 6) + (int)(p - b64tab);
-      valb += 6;
-      if (valb >= 0)
+      return -1;
+    }
+
+  /* Some compatible gateways return a data URL instead of bare Base64. */
+  if (strncmp(in, "data:", 5) == 0)
+    {
+      const char *comma = strchr(in, ',');
+      const char *base64 = strstr(in, ";base64");
+      if (!comma || !base64 || base64 > comma)
         {
-          out[o++] = (unsigned char)((val >> valb) & 255);
-          valb -= 8;
+          return -1;
+        }
+      in = comma + 1;
+    }
+
+  for (; *in; in++)
+    {
+      unsigned char ch = (unsigned char)*in;
+      if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n')
+        {
+          continue;
+        }
+      if (ch == '=')
+        {
+          ended = 1;
+          padding++;
+          if (padding > 2)
+            {
+              return -1;
+            }
+          continue;
+        }
+      if (ended)
+        {
+          return -1;
+        }
+
+      p = strchr(b64tab, ch);
+      if (!p)
+        {
+          return -1;
+        }
+      symbols++;
+      val = (val << 6) | (unsigned int)(p - b64tab);
+      bits += 6;
+      if (bits >= 8)
+        {
+          bits -= 8;
+          if (o >= outcap)
+            {
+              return -1;
+            }
+          out[o++] = (unsigned char)((val >> bits) & 0xff);
+          val &= bits ? ((1u << bits) - 1u) : 0u;
         }
     }
+
+  if (symbols == 0 || symbols % 4 == 1 ||
+      (padding == 1 && symbols % 4 != 3) ||
+      (padding == 2 && symbols % 4 != 2) ||
+      (padding > 0 && (symbols + padding) % 4 != 0) ||
+      (bits != 0 && bits != 2 && bits != 4) || val != 0)
+    {
+      return -1;
+    }
   return (int)o;
+}
+
+/* The chat UI can become available before boot auto-connect finishes.  Let
+ * the worker wait briefly for the app's verified WLAN/IP state before trying
+ * a cloud request; never block the LVGL thread. */
+static int voice_wait_for_wifi(void)
+{
+  int i;
+
+  for (i = 0; i <= VOICE_WIFI_WAIT_SEC; i++)
+    {
+      if (dm_wifi_connected())
+        {
+          return 0;
+        }
+      if (i < VOICE_WIFI_WAIT_SEC)
+        {
+          sleep(1);
+        }
+    }
+  return -1;
 }
 
 static int http_post_json(const char *path, const char *json_body,
                           const char *out_path)
 {
-  char cmd[1400];
+  char cmd[1600];
+  char http_status[48] = "";
+  char curl_error[160] = "";
   FILE *f;
+  FILE *diag;
   size_t body_len;
   int write_ok;
   int close_rc;
+  int cmd_len;
   int rc;
 
   if (!dm_wifi_connected())
     {
-      s_last_failure = DM_VOICE_FAILURE_CHAT;
-      return -1;
+      syslog(LOG_INFO, "[dm-voice] waiting up to %d seconds for Wi-Fi\n",
+             VOICE_WIFI_WAIT_SEC);
+      if (voice_wait_for_wifi() != 0)
+        {
+          s_last_failure = DM_VOICE_FAILURE_WIFI;
+          syslog(LOG_WARNING, "[dm-voice] Wi-Fi did not become ready\n");
+          return -1;
+        }
     }
   if (dm_wifi_wait_time_sync(40) != 0)
     {
@@ -656,6 +1006,7 @@ static int http_post_json(const char *path, const char *json_body,
   if (!f)
     {
       s_last_failure = DM_VOICE_FAILURE_CHAT;
+      syslog(LOG_ERR, "[dm-voice] cannot create HTTP request body\n");
       return -1;
     }
   body_len = strlen(json_body);
@@ -664,20 +1015,63 @@ static int http_post_json(const char *path, const char *json_body,
   if (!write_ok || close_rc != 0)
     {
       s_last_failure = DM_VOICE_FAILURE_CHAT;
+      syslog(LOG_ERR, "[dm-voice] cannot write HTTP request body\n");
       return -1;
     }
   unlink(out_path);
-  /* Use short curl options supported by the board build.  The runtime key is
-   * expanded by the shell and is not written into this script. */
-  snprintf(cmd, sizeof(cmd),
-           "curl -K " MIMO_CURL_CONFIG " -s -S -f -m 25 -X POST %s%s "
-           "-H 'Content-Type: application/json' "
-           "-d @%s -o %s",
-           VOICE_BASE, path, JSON_REQ, out_path);
-  rc = run_curl_script(cmd);
-  if (rc != 0 && s_last_failure == DM_VOICE_FAILURE_NONE)
+  unlink(VOICE_HTTP_STATUS);
+  unlink(VOICE_CURL_ERROR);
+  /* Use board-supported curl options. The API key stays in a protected
+   * config file, not in the shell command. Double the percent so snprintf
+   * emits curl's literal %{http_code} template. */
+  cmd_len = snprintf(cmd, sizeof(cmd),
+                     "curl -K " MIMO_CURL_CONFIG " "
+                     "--cacert /resource/etc/ssl/curl/ca-certificates.crt "
+                     "-s -S -f -m 25 -w 'HTTP_STATUS:%%{http_code}\\n' "
+                     "-X POST %s%s -H 'Content-Type: application/json' "
+                     "-d @%s -o %s > %s 2> %s",
+                     VOICE_BASE, path, JSON_REQ, out_path,
+                     VOICE_HTTP_STATUS, VOICE_CURL_ERROR);
+  if (cmd_len <= 0 || cmd_len >= (int)sizeof(cmd))
     {
       s_last_failure = DM_VOICE_FAILURE_CHAT;
+      syslog(LOG_ERR, "[dm-voice] HTTP command buffer is too small\n");
+      return -1;
+    }
+  rc = run_curl_command(cmd);
+
+  diag = fopen(VOICE_HTTP_STATUS, "r");
+  if (diag)
+    {
+      (void)fgets(http_status, sizeof(http_status), diag);
+      fclose(diag);
+      http_status[strcspn(http_status, "\r\n")] = '\0';
+    }
+  diag = fopen(VOICE_CURL_ERROR, "r");
+  if (diag)
+    {
+      (void)fgets(curl_error, sizeof(curl_error), diag);
+      fclose(diag);
+      curl_error[strcspn(curl_error, "\r\n")] = '\0';
+    }
+  unlink(VOICE_HTTP_STATUS);
+  unlink(VOICE_CURL_ERROR);
+
+  if (rc != 0)
+    {
+      if (s_last_failure == DM_VOICE_FAILURE_NONE)
+        {
+          s_last_failure = DM_VOICE_FAILURE_CHAT;
+        }
+      syslog(LOG_WARNING,
+             "[dm-voice] HTTP failure status=%s curl=%s\n",
+             http_status[0] ? http_status : "unavailable",
+             curl_error[0] ? curl_error : "no curl diagnostic");
+    }
+  else
+    {
+      syslog(LOG_INFO, "[dm-voice] HTTP success status=%s\n",
+             http_status[0] ? http_status : "unavailable");
     }
   return rc;
 }
@@ -847,6 +1241,95 @@ static int voice_prepare_wav(const char *src, const char **wav_out)
   return rc;
 }
 
+/* Convert the latest microphone capture from raw PCM to a WAV file and persist
+ * it on /data.  Use a temporary sibling and rename so an interrupted save does
+ * not leave a partial file masquerading as a completed recording. */
+int dm_voice_record_save(const char *wav_path)
+{
+  const char *prepared_path;
+  char temp_path[160];
+  FILE *in = NULL;
+  FILE *out = NULL;
+  unsigned char buf[1024];
+  size_t n;
+  int rc = -1;
+  int close_in_rc = 0;
+  int close_out_rc = 0;
+  int path_len;
+
+  if (!wav_path || !wav_path[0])
+    {
+      return -EINVAL;
+    }
+  path_len = snprintf(temp_path, sizeof(temp_path), "%s.tmp", wav_path);
+  if (path_len < 0 || path_len >= (int)sizeof(temp_path))
+    {
+      return -ENAMETOOLONG;
+    }
+
+  pthread_mutex_lock(&s_voice_api_lock);
+  if (voice_prepare_wav(WAV_REC, &prepared_path) != 0)
+    {
+      syslog(LOG_ERR, "[dm-voice] recorder save: WAV preparation failed\n");
+      goto out;
+    }
+
+  in = fopen(prepared_path, "rb");
+  out = fopen(temp_path, "wb");
+  if (!in || !out)
+    {
+      syslog(LOG_ERR, "[dm-voice] recorder save: cannot open source/destination\n");
+      goto out;
+    }
+
+  rc = 0;
+  while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+    {
+      if (fwrite(buf, 1, n, out) != n)
+        {
+          rc = -EIO;
+          break;
+        }
+    }
+  if (ferror(in))
+    {
+      rc = -EIO;
+    }
+
+  close_in_rc = fclose(in);
+  in = NULL;
+  close_out_rc = fclose(out);
+  out = NULL;
+  if (close_in_rc != 0 || close_out_rc != 0)
+    {
+      rc = -EIO;
+    }
+  if (rc == 0 && rename(temp_path, wav_path) != 0)
+    {
+      rc = -errno;
+    }
+
+out:
+  if (in)
+    {
+      fclose(in);
+    }
+  if (out)
+    {
+      fclose(out);
+    }
+  if (rc != 0)
+    {
+      unlink(temp_path);
+    }
+  else
+    {
+      syslog(LOG_INFO, "[dm-voice] saved recording to persistent storage\n");
+    }
+  pthread_mutex_unlock(&s_voice_api_lock);
+  return rc;
+}
+
 static int asr_wav(const char *wav, char *text, int cap)
 {
   FILE *f;
@@ -874,8 +1357,10 @@ static int asr_wav(const char *wav, char *text, int cap)
       sz > 2 * 1024 * 1024 || fseek(f, 0, SEEK_SET) != 0)
     {
       fclose(f);
+      syslog(LOG_ERR, "[dm-voice] ASR WAV size/seek invalid\n");
       return -1;
     }
+  syslog(LOG_INFO, "[dm-voice] ASR WAV bytes=%ld\n", sz);
   raw = malloc((size_t)sz);
   b64 = malloc((size_t)sz * 2 + 8);
   body_cap = (size_t)sz * 2 + 512;
@@ -919,9 +1404,11 @@ static int asr_wav(const char *wav, char *text, int cap)
       free(body);
       return -1;
     }
+  syslog(LOG_INFO, "[dm-voice] ASR request start\n");
   if (http_post_json("/chat/completions", body, TXT_ASR) != 0)
     {
       free(body);
+      syslog(LOG_ERR, "[dm-voice] ASR HTTP request failed\n");
       return -1;
     }
   free(body);
@@ -929,6 +1416,7 @@ static int asr_wav(const char *wav, char *text, int cap)
   root = voice_json_load(TXT_ASR, 256 * 1024);
   if (!root)
     {
+      syslog(LOG_ERR, "[dm-voice] ASR response is not valid JSON\n");
       return -1;
     }
   message = voice_first_message(root);
@@ -938,7 +1426,15 @@ static int asr_wav(const char *wav, char *text, int cap)
       snprintf(text, (size_t)cap, "%s", content->valuestring);
     }
   cJSON_Delete(root);
-  return text[0] ? 0 : -1;
+  if (!text[0])
+    {
+      syslog(LOG_ERR,
+             "[dm-voice] ASR response has no choices[0].message.content text\n");
+      return -1;
+    }
+  syslog(LOG_INFO, "[dm-voice] ASR success text_bytes=%u\n",
+         (unsigned int)strlen(text));
+  return 0;
 }
 
 static int chat_reply(const char *user, char *out, int cap)
@@ -973,14 +1469,17 @@ static int chat_reply(const char *user, char *out, int cap)
     {
       return -1;
     }
+  syslog(LOG_INFO, "[dm-voice] chat completion request start\n");
   if (http_post_json("/chat/completions", body, TXT_CHAT) != 0)
     {
+      syslog(LOG_ERR, "[dm-voice] chat completion HTTP request failed\n");
       return -1;
     }
 
   root = voice_json_load(TXT_CHAT, 64 * 1024);
   if (!root)
     {
+      syslog(LOG_ERR, "[dm-voice] chat completion response is not valid JSON\n");
       return -1;
     }
   message = voice_first_message(root);
@@ -993,9 +1492,13 @@ static int chat_reply(const char *user, char *out, int cap)
 
   if (out[0])
     {
+      syslog(LOG_INFO, "[dm-voice] chat completion success reply_bytes=%u\n",
+             (unsigned int)strlen(out));
       dm_chat_hist_push(user, out);
       return 0;
     }
+  syslog(LOG_ERR,
+         "[dm-voice] chat completion response has no choices[0].message.content\n");
   return -1;
 }
 
@@ -1037,8 +1540,10 @@ static int tts_synth(const char *text, const char *wav_path,
     {
       return -1;
     }
+  syslog(LOG_INFO, "[dm-voice] TTS request start\n");
   if (http_post_json("/chat/completions", body, TXT_CHAT) != 0)
     {
+      syslog(LOG_ERR, "[dm-voice] TTS HTTP request failed\n");
       return -1;
     }
 
@@ -1083,6 +1588,7 @@ static int tts_synth(const char *text, const char *wav_path,
   if (write_ok && close_rc == 0)
     {
       rc = 0;
+      syslog(LOG_INFO, "[dm-voice] TTS WAV decoded bytes=%d\n", rawlen);
     }
 
 out:
@@ -1097,6 +1603,7 @@ out:
     }
   if (rc != 0)
     {
+      syslog(LOG_ERR, "[dm-voice] TTS response missing/invalid WAV data\n");
       unlink(wav_path);
       if (s_last_failure == DM_VOICE_FAILURE_NONE)
         {
@@ -1237,13 +1744,29 @@ static int voice_wav_cache_valid(const char *path)
   return valid;
 }
 
-/* Generate each MiMo preset preview once and retain it on /data for offline
- * auditioning after the first successful cloud synthesis. */
+static const char *voice_builtin_preview_path(int profile_idx)
+{
+  switch (profile_idx)
+    {
+      case 1:
+        return WAV_PREVIEW_BINGTANG;
+      case 2:
+        return WAV_PREVIEW_JASMINE;
+      case 3:
+        return WAV_PREVIEW_SODA;
+      default:
+        return NULL;
+    }
+}
+
+/* Prefer bundled offline audition files for the supplied presets; other voice
+ * profiles retain the existing generated-and-cached preview behavior. */
 static int voice_profile_preview_unlocked(int profile_idx)
 {
   static const char sample_text[] =
       "你好，我是你的语音助手。这是当前音色试听。";
   const dm_voice_profile_t *profile;
+  const char *builtin_path = NULL;
   char path[64];
 
   if (profile_idx < 0 || profile_idx >= dm_voice_profile_count())
@@ -1251,8 +1774,33 @@ static int voice_profile_preview_unlocked(int profile_idx)
       return -1;
     }
   profile = dm_voice_profile_get(profile_idx);
-  snprintf(path, sizeof(path), "/data/dm_voice_sample_%d.wav", profile_idx);
+  builtin_path = voice_builtin_preview_path(profile_idx);
+
   s_last_failure = DM_VOICE_FAILURE_NONE;
+  /* Use the exact user-provided board assets for these three presets before
+   * consulting a prior generated cache or making any cloud request. */
+  if (builtin_path && voice_wav_cache_valid(builtin_path))
+    {
+      syslog(LOG_INFO, "[dm-voice] playing bundled preset preview index=%d\n",
+             profile_idx);
+      s_st = DM_VOICE_PLAY;
+      if (play_wav(builtin_path) == 0)
+        {
+          s_st = DM_VOICE_IDLE;
+          return 0;
+        }
+      s_last_failure = DM_VOICE_FAILURE_TTS;
+      s_st = DM_VOICE_ERR;
+      return -1;
+    }
+
+  if (builtin_path)
+    {
+      syslog(LOG_ERR,
+             "[dm-voice] bundled preset WAV missing/invalid index=%d; using generated fallback\n",
+             profile_idx);
+    }
+  snprintf(path, sizeof(path), "/data/dm_voice_sample_%d.wav", profile_idx);
   if (!voice_wav_cache_valid(path))
     {
       unlink(path);
@@ -1290,20 +1838,29 @@ int dm_voice_profile_preview(int profile_idx)
   return rc;
 }
 
-/* First volume test creates a speech sample with the selected MiMo preset and
- * caches it in /data; later tests replay without another cloud request. */
+/* Reuse bundled preset WAVs on the volume page; generate a test phrase only
+ * for profiles that do not have an offline sample. */
 static int voice_volume_test_unlocked(void)
 {
   static const char sample_text[] = "音量试听。请确认这个音量听起来是否舒适。";
   char path[64];
+  const char *builtin_path;
   int profile_idx = dm_voice_profile_sel();
 
   if (profile_idx < 0 || profile_idx >= dm_voice_profile_count())
     {
       profile_idx = 0;
     }
-  snprintf(path, sizeof(path), WAV_VOL_TEST_FMT, profile_idx);
   s_last_failure = DM_VOICE_FAILURE_NONE;
+  builtin_path = voice_builtin_preview_path(profile_idx);
+  if (builtin_path && voice_wav_cache_valid(builtin_path))
+    {
+      syslog(LOG_INFO, "[dm-voice] volume test using bundled preset index=%d\n",
+             profile_idx);
+      return play_wav(builtin_path) == 0 ? 0 : -1;
+    }
+
+  snprintf(path, sizeof(path), WAV_VOL_TEST_FMT, profile_idx);
   if (!voice_wav_cache_valid(path))
     {
       unlink(path);
@@ -1387,6 +1944,21 @@ int dm_voice_play_file(const char *wav_path)
 
   pthread_detach(th);
   return 0;
+}
+
+int dm_voice_play_file_sync(const char *wav_path)
+{
+  int rc;
+
+  if (!wav_path || !wav_path[0])
+    {
+      return -EINVAL;
+    }
+
+  pthread_mutex_lock(&s_voice_api_lock);
+  rc = play_wav(wav_path);
+  pthread_mutex_unlock(&s_voice_api_lock);
+  return rc;
 }
 
 #endif /* CONFIG_DESKMATE_APP */

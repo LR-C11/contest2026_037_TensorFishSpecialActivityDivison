@@ -82,6 +82,7 @@ int flowdesk_main(int argc, FAR char *argv[])
   dm_create_tools();
   dm_create_life();
   dm_create_fun();
+  dm_create_recorder();
   dm_create_2048();
   dm_create_mbti();
   dm_create_dict();
@@ -92,6 +93,7 @@ int flowdesk_main(int argc, FAR char *argv[])
   dm_create_note();
   dm_create_settings();
   dm_create_wifi();
+  dm_wifi_manual_time_restore();
   dm_wifi_auto_start();
   dm_create_app_connect();
   dm_create_dock();

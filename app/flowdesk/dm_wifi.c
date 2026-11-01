@@ -45,6 +45,7 @@
 #include <pthread.h>
 #include <errno.h>
 #include <time.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/ioctl.h>
@@ -63,6 +64,7 @@
 #define DM_WIFI_NTP_SERVERS \
   "ntp.aliyun.com;time2.cloud.tencent.com;time3.cloud.tencent.com"
 #define DM_WIFI_NTP_RETRY_SEC 30
+#define DM_WIFI_MANUAL_TIME_PATH "/data/deskmate_manual_time.txt"
 
 /* Fallback AP when no saved credentials exist.
  * Keep empty so personal WiFi credentials are NOT hardcoded in the repository.
@@ -81,6 +83,7 @@ static volatile int s_reconnect_running;
 static volatile int s_auto_thread_active;
 static uint64_t s_reconnect_retry_after_ms;
 static uint64_t s_ntp_retry_after_ms;
+static volatile int s_manual_time_set;
 static pthread_mutex_t s_ntp_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static uint64_t wifi_monotonic_ms(void)
@@ -255,9 +258,16 @@ static int wifi_get_valid_ip(struct in_addr *addr)
   return 0;
 }
 
-static int wifi_clock_synced(void)
+static int wifi_ntp_has_samples(void)
 {
   struct ntpc_status_s status;
+
+  memset(&status, 0, sizeof(status));
+  return ntpc_status(&status) == 0 && status.nsamples > 0;
+}
+
+static int wifi_clock_synced(void)
+{
   struct tm utc;
   time_t now = time(NULL);
 
@@ -266,12 +276,78 @@ static int wifi_clock_synced(void)
       return 0;
     }
 
-  if (ntpc_status(&status) != 0 || status.nsamples == 0)
+  /* A saved/manual clock is usable for TLS while NTP is being retried; an
+   * actual NTP sample remains the authoritative source when available. */
+  return wifi_ntp_has_samples() || s_manual_time_set;
+}
+
+void dm_wifi_manual_time_mark(void)
+{
+  FILE *f;
+  time_t now = time(NULL);
+
+  pthread_mutex_lock(&s_ntp_lock);
+  s_manual_time_set = 1;
+  s_ntp_retry_after_ms = 0;
+  pthread_mutex_unlock(&s_ntp_lock);
+
+  f = fopen(DM_WIFI_MANUAL_TIME_PATH, "w");
+  if (f)
     {
-      return 0;
+      fprintf(f, "%lld\n", (long long)now);
+      fclose(f);
+    }
+  syslog(LOG_INFO,
+         "[deskmate-wifi] manual system time set; saved local clock seed\n");
+}
+
+void dm_wifi_manual_time_restore(void)
+{
+  FILE *f;
+  long long saved_epoch;
+  time_t saved_time;
+  time_t current_time = time(NULL);
+  struct tm utc;
+  struct timeval tv;
+
+  /* Never replace a valid RTC or an NTP time that arrived early at boot. */
+  if (current_time > 0 && gmtime_r(&current_time, &utc) != NULL &&
+      utc.tm_year + 1900 >= 2024)
+    {
+      return;
     }
 
-  return 1;
+  f = fopen(DM_WIFI_MANUAL_TIME_PATH, "r");
+  if (!f)
+    {
+      return;
+    }
+  if (fscanf(f, "%lld", &saved_epoch) != 1)
+    {
+      fclose(f);
+      return;
+    }
+  fclose(f);
+
+  saved_time = (time_t)saved_epoch;
+  if ((long long)saved_time != saved_epoch || saved_time <= 0 ||
+      gmtime_r(&saved_time, &utc) == NULL || utc.tm_year + 1900 < 2024 ||
+      utc.tm_year + 1900 > 2099)
+    {
+      return;
+    }
+
+  tv.tv_sec = saved_time;
+  tv.tv_usec = 0;
+  if (settimeofday(&tv, NULL) == 0)
+    {
+      pthread_mutex_lock(&s_ntp_lock);
+      s_manual_time_set = 1;
+      s_ntp_retry_after_ms = 0;
+      pthread_mutex_unlock(&s_ntp_lock);
+      syslog(LOG_INFO,
+             "[deskmate-wifi] restored saved local clock seed; NTP may correct it\n");
+    }
 }
 
 static void wifi_restart_ntp_after_link(void)
@@ -280,7 +356,7 @@ static void wifi_restart_ntp_after_link(void)
   int start_rc;
   uint64_t now_ms;
 
-  if (wifi_clock_synced())
+  if (wifi_ntp_has_samples())
     {
       return;
     }
@@ -1306,7 +1382,7 @@ static void *conn_thread(void *arg)
   wifi_cred_save(try_ssid, try_pass);
   s_manual_override = 0;
   s_link_lost = 0;
-  if (!wifi_clock_synced())
+  if (!wifi_ntp_has_samples())
     {
       wifi_restart_ntp_after_link();
     }
@@ -1519,7 +1595,7 @@ static void *auto_thread(void *arg)
           syslog(LOG_INFO, "[deskmate-wifi] already connected ssid=%s ip=%s\n",
                  s_cur_ssid, s_cur_ip);
           wifi_cred_save(ssid, pass);
-          if (!wifi_clock_synced())
+          if (!wifi_ntp_has_samples())
             {
               wifi_restart_ntp_after_link();
             }

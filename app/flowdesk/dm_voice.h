@@ -6,8 +6,14 @@
 
 #include <stdbool.h>
 
+/* Run MiMo/cURL + TLS + JSON work on a larger task stack than lightweight UI
+ * callbacks; this is separate from handling transport/formatting failures. */
+#define DM_VOICE_NET_WORKER_STACK 65536
+#define DM_VOICE_RECORD_PATH "/data/flowdesk_recording.wav"
+
 typedef enum {
   DM_VOICE_FAILURE_NONE = 0,
+  DM_VOICE_FAILURE_WIFI,
   DM_VOICE_FAILURE_TIME,
   DM_VOICE_FAILURE_API_KEY,
   DM_VOICE_FAILURE_ASR,
@@ -39,6 +45,8 @@ int dm_voice_asr_chat_tts(const char *wav_path, char *reply, int reply_cap);
 int dm_voice_tts_play(const char *text);
 int dm_voice_profile_preview(int profile_idx); /* generates/caches once per voice */
 int dm_voice_play_file(const char *wav_path); /* schedules local WAV playback */
+int dm_voice_play_file_sync(const char *wav_path); /* blocking; worker only */
+int dm_voice_record_save(const char *wav_path); /* WAV wrapper + persistent copy */
 int dm_voice_beep(void);                      /* synchronous; call from worker */
 int dm_voice_volume_test(void);                /* 0=speech, 1=tone fallback, <0=fail */
 void dm_voice_set_speaker_volume(int percent);

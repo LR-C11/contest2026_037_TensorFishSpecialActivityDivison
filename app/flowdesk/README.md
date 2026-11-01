@@ -14,17 +14,18 @@
 - **点按录音**：点一下开始录，再点结束并发送
 - 链路：`/dev/audio/pcm0c` → ASR `mimo-v2.5-asr` → LLM `mimo-v2.6-flash` → TTS `mimo-v2.5-tts` → 喇叭
 - 云端：`https://token-plan-ams.xiaomimimo.com/v1/chat/completions`
-- ASR / LLM / TTS 都走 Chat Completions；TTS 使用 MiMo 预置音色，试听首用时在线生成并缓存到 `/data`。
+- ASR / LLM / TTS 都走 Chat Completions；冰糖、茉莉、苏打试听样本预置在 `/resource/audio/`，可离线试听；其他云端音色首用时在线生成并缓存到 `/data`。
 
 ### 词典（BandLingo 风格）
 - 本地词库约 6.5 万词（`word|definition`，a–z 分片，LRU 缓存）
 - 英文查词 / 中文查释义 / 每日一词 / AI 释义
 - **独立可滑动页面**：查词列表、释义详情
 
-### 设定（6 项，可滑动）
+### 设定（7 项，可滑动）
 | 项 | 说明 |
 |----|------|
 | Wi-Fi | 手动扫描连接（`wapi` 重试） |
+| 日期与时间 | 网络 NTP 不可用时手动校准；保存一个下次启动可用的本地时间种子 |
 | 蓝牙耳机 | A2DP Source 扫描/连接耳机 |
 | App 连接 | 专属 BLE Challenge-Response 配对 |
 | 音量 | 滑杆 / 静音 / 试听 + **音频输出**（自动/喇叭/耳机） |
@@ -37,6 +38,7 @@
 
 ### 其它
 - 背单词、2048、MBTI、备忘、吃药、喝水、计算器等
+- 功能页「录音管理」：独立页面，最多保存 10 段录音、每段最长 30 秒；以循环槽位保存在 `/data/flowdesk_recording_01.wav` 至 `_10.wav`，可选择并通过板载扬声器回放。满 10 段后新录音覆盖最旧槽位。
 - **底栏**：专注 / 聊天 / 健康 / 功能 / 设定
 
 ## 目录
@@ -48,7 +50,7 @@ vendor/allwinnertech/apps/flowdesk/
   dm_wifi.c / dm_ui_wifi.c          # WiFi + 设定入口
   dm_ui_btnet.c                     # 蓝牙耳机 A2DP
   dm_ui_appconn.c / dm_ble_gatt.c   # App BLE 配对
-  dm_ui_chat.c / dm_chat_ai.c / dm_voice.c
+  dm_ui_chat.c / dm_chat_ai.c / dm_voice.c / dm_ui_recorder.c
   dm_dict.c / dm_ui_dict.c
   dm_audio_vol.c / dm_ui_vol.c / dm_audio_route.c
   dm_tts_voice.c / dm_ui_voice.c
@@ -102,9 +104,9 @@ lichee/out/r528s3/gemini-s1_nand/rtos_nuttx_r528s3-gemini-s1_uart0_128Mnand.img
 
 ## 设备运行时配置
 
-- API 密钥仅从设备 `/data/deskmate_mimo.key` 读取（一行纯文本）；不要写入源码或提交到仓库，已暴露的密钥应先轮换。
-- HTTPS 仅在 NTP 已获取有效样本且系统时间可信后发送，TLS 证书校验保持开启。
-- 音色试听第一次需要云端合成；样本保存到 `/data`，之后可离线重播。
+- 默认使用固件内置的 Token Plan API 密钥；如 `/data/deskmate_mimo.key` 存在且有效，则优先使用该运行时密钥覆盖。源码和固件会包含默认密钥，请勿公开分发；已暴露密钥建议轮换。
+- HTTPS 优先依赖 NTP 有效样本；设置页可手动设定设备本地日期时间，并保存上次设定作为下次启动的临时时钟种子，NTP 有效后再自动校正。TLS 证书校验保持开启。
+- 冰糖、茉莉、苏打预置 WAV 打包在 `/resource/audio/`，可离线试听；其他音色首次试听需要云端合成并缓存到 `/data`。
 
 ## 运行
 

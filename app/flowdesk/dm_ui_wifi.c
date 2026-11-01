@@ -16,6 +16,8 @@
 #include "deskmate.h"
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+#include <sys/time.h>
 
 #ifdef CONFIG_DESKMATE_APP
 
@@ -44,6 +46,11 @@ static lv_obj_t *s_done_page;
 static lv_obj_t *s_done_icon;
 static lv_obj_t *s_done_title;
 static lv_obj_t *s_done_sub;
+static lv_obj_t *s_time_now_l;
+static lv_obj_t *s_time_hint_l;
+static lv_obj_t *s_time_value_l[5];
+static int s_time_value[5];
+static int s_time_tick;
 
 static char s_kb_buf[64];
 static int s_kb_len;
@@ -330,6 +337,9 @@ static void open_about(lv_event_t *e)
   (void)e;
   dm_show(PAGE_ABOUT);
 }
+
+static void open_time_set(lv_event_t *e);
+static void create_time_set_page(void);
 
 static void open_wifi(lv_event_t *e)
 {
@@ -618,6 +628,345 @@ static void done_ok(lv_event_t *e)
   dm_show(PAGE_WIFI);
 }
 
+static int time_days_in_month(int year, int month)
+{
+  static const int days[] = { 31, 28, 31, 30, 31, 30,
+                              31, 31, 30, 31, 30, 31 };
+  int leap;
+
+  if (month < 1 || month > 12)
+    {
+      return 31;
+    }
+  leap = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0);
+  if (month == 2 && leap)
+    {
+      return 29;
+    }
+  return days[month - 1];
+}
+
+static void time_seed_from_build(void)
+{
+  static const char *const months[] =
+    { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+  char mon[4] = { 0 };
+  int day = 1;
+  int year = 2026;
+  int hour = 12;
+  int minute = 0;
+  int second = 0;
+  int i;
+
+  s_time_value[0] = year;
+  s_time_value[1] = 1;
+  s_time_value[2] = 1;
+  if (sscanf(__DATE__, "%3s %d %d", mon, &day, &year) == 3)
+    {
+      for (i = 0; i < 12; i++)
+        {
+          if (strcmp(mon, months[i]) == 0)
+            {
+              s_time_value[1] = i + 1;
+              break;
+            }
+        }
+      s_time_value[0] = year;
+      s_time_value[2] = day;
+    }
+  else
+    {
+      s_time_value[0] = year;
+      s_time_value[1] = 1;
+      s_time_value[2] = 1;
+    }
+
+  if (sscanf(__TIME__, "%d:%d:%d", &hour, &minute, &second) != 3)
+    {
+      hour = 12;
+      minute = 0;
+    }
+  s_time_value[3] = hour;
+  s_time_value[4] = minute;
+}
+
+static void time_init_fields(void)
+{
+  time_t now = time(NULL);
+  struct tm current;
+
+  if (now > 0 && localtime_r(&now, &current) != NULL &&
+      current.tm_year + 1900 >= 2024)
+    {
+      s_time_value[0] = current.tm_year + 1900;
+      s_time_value[1] = current.tm_mon + 1;
+      s_time_value[2] = current.tm_mday;
+      s_time_value[3] = current.tm_hour;
+      s_time_value[4] = current.tm_min;
+    }
+  else
+    {
+      time_seed_from_build();
+    }
+}
+
+static void time_refresh_labels(void)
+{
+  char buf[64];
+  time_t now = time(NULL);
+  struct tm tmv;
+  int i;
+
+  for (i = 0; i < 5; i++)
+    {
+      if (s_time_value_l[i])
+        {
+          lv_snprintf(buf, sizeof(buf), "%d", s_time_value[i]);
+          lv_label_set_text(s_time_value_l[i], buf);
+        }
+    }
+
+  if (!s_time_now_l)
+    {
+      return;
+    }
+
+  if (now > 0 && localtime_r(&now, &tmv) != NULL)
+    {
+      lv_snprintf(buf, sizeof(buf), "%s %04d-%02d-%02d %02d:%02d",
+                  dm_t("系统时间", "Device"), tmv.tm_year + 1900,
+                  tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+    }
+  else
+    {
+      lv_snprintf(buf, sizeof(buf), "%s", dm_t("系统时间不可用", "Clock unavailable"));
+    }
+  lv_label_set_text(s_time_now_l, buf);
+}
+
+static void time_back_cb(lv_event_t *e)
+{
+  (void)e;
+  dm_show(PAGE_SETTINGS);
+}
+
+static void time_step_cb(lv_event_t *e)
+{
+  int action = (int)(intptr_t)lv_event_get_user_data(e);
+  int field = action >> 1;
+  int delta = (action & 1) ? 1 : -1;
+
+  if (field < 0 || field >= 5)
+    {
+      return;
+    }
+
+  switch (field)
+    {
+      case 0:
+        s_time_value[0] += delta;
+        if (s_time_value[0] < 2024) s_time_value[0] = 2024;
+        if (s_time_value[0] > 2099) s_time_value[0] = 2099;
+        if (s_time_value[2] > time_days_in_month(s_time_value[0],
+                                                  s_time_value[1]))
+          {
+            s_time_value[2] = time_days_in_month(s_time_value[0],
+                                                  s_time_value[1]);
+          }
+        break;
+      case 1:
+        s_time_value[1] += delta;
+        if (s_time_value[1] < 1) s_time_value[1] = 12;
+        if (s_time_value[1] > 12) s_time_value[1] = 1;
+        if (s_time_value[2] > time_days_in_month(s_time_value[0],
+                                                   s_time_value[1]))
+          {
+            s_time_value[2] = time_days_in_month(s_time_value[0],
+                                                  s_time_value[1]);
+          }
+        break;
+      case 2:
+        s_time_value[2] += delta;
+        if (s_time_value[2] < 1)
+          {
+            s_time_value[2] = time_days_in_month(s_time_value[0],
+                                                  s_time_value[1]);
+          }
+        if (s_time_value[2] > time_days_in_month(s_time_value[0],
+                                                  s_time_value[1]))
+          {
+            s_time_value[2] = 1;
+          }
+        break;
+      case 3:
+        s_time_value[3] = (s_time_value[3] + delta + 24) % 24;
+        break;
+      case 4:
+        s_time_value[4] = (s_time_value[4] + delta + 60) % 60;
+        break;
+    }
+  time_refresh_labels();
+}
+
+static void time_make_field(lv_obj_t *page, int field, int x, int y,
+                            int width, const char *zh, const char *en)
+{
+  lv_obj_t *label;
+  lv_obj_t *minus;
+  lv_obj_t *plus;
+  int button_w = width >= 110 ? 26 : 22;
+  int value_w = width - 2 * button_w - 8;
+
+  label = dm_lbl(page, zh, en, g_dm_font_s, MD_ON_SURFACE_VARIANT);
+  lv_obj_set_width(label, width);
+  lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_pos(label, x, y);
+
+  minus = dm_btn(page, "−", "-", button_w, 27, MD_SURFACE_HIGH,
+                 MD_ON_SURFACE, time_step_cb,
+                 (void *)(intptr_t)(field << 1));
+  lv_obj_set_pos(minus, x, y + 18);
+
+  s_time_value_l[field] = dm_lbl(page, "0", "0", g_dm_font_m,
+                                 MD_ON_SURFACE);
+  lv_obj_set_width(s_time_value_l[field], value_w);
+  lv_obj_set_style_text_align(s_time_value_l[field], LV_TEXT_ALIGN_CENTER,
+                              LV_PART_MAIN);
+  lv_obj_set_pos(s_time_value_l[field], x + button_w + 4, y + 18);
+
+  plus = dm_btn(page, "+", "+", button_w, 27, MD_SURFACE_HIGH,
+                MD_ON_SURFACE, time_step_cb,
+                (void *)(intptr_t)((field << 1) | 1));
+  lv_obj_set_pos(plus, x + width - button_w, y + 18);
+}
+
+static void time_apply_cb(lv_event_t *e)
+{
+  struct tm requested;
+  struct tm verify;
+  struct timeval tv;
+  time_t epoch;
+
+  (void)e;
+  if (s_time_value[0] < 2024 || s_time_value[0] > 2099 ||
+      s_time_value[1] < 1 || s_time_value[1] > 12 ||
+      s_time_value[2] < 1 ||
+      s_time_value[2] > time_days_in_month(s_time_value[0],
+                                            s_time_value[1]) ||
+      s_time_value[3] < 0 || s_time_value[3] > 23 ||
+      s_time_value[4] < 0 || s_time_value[4] > 59)
+    {
+      if (s_time_hint_l)
+        {
+          lv_label_set_text(s_time_hint_l,
+                            dm_t("日期或时间超出范围", "Date/time out of range"));
+        }
+      return;
+    }
+
+  memset(&requested, 0, sizeof(requested));
+  requested.tm_year = s_time_value[0] - 1900;
+  requested.tm_mon = s_time_value[1] - 1;
+  requested.tm_mday = s_time_value[2];
+  requested.tm_hour = s_time_value[3];
+  requested.tm_min = s_time_value[4];
+  requested.tm_isdst = -1;
+  epoch = mktime(&requested);
+  if (epoch == (time_t)-1 || localtime_r(&epoch, &verify) == NULL ||
+      verify.tm_year != s_time_value[0] - 1900 ||
+      verify.tm_mon != s_time_value[1] - 1 ||
+      verify.tm_mday != s_time_value[2] ||
+      verify.tm_hour != s_time_value[3] ||
+      verify.tm_min != s_time_value[4])
+    {
+      if (s_time_hint_l)
+        {
+          lv_label_set_text(s_time_hint_l,
+                            dm_t("系统无法识别该日期", "Invalid local date"));
+        }
+      return;
+    }
+
+  tv.tv_sec = epoch;
+  tv.tv_usec = 0;
+  if (settimeofday(&tv, NULL) != 0)
+    {
+      if (s_time_hint_l)
+        {
+          lv_label_set_text(s_time_hint_l,
+                            dm_t("设置失败，请确认系统允许改时钟",
+                                 "Set failed; clock change may be restricted"));
+        }
+      return;
+    }
+
+  dm_wifi_manual_time_mark();
+  time_refresh_labels();
+  if (s_time_hint_l)
+    {
+      lv_label_set_text(s_time_hint_l,
+                        dm_t("已设置；网络 NTP 同步后会自动校正",
+                             "Set; NTP will correct it when available"));
+    }
+}
+
+static void open_time_set(lv_event_t *e)
+{
+  (void)e;
+  time_init_fields();
+  time_refresh_labels();
+  if (s_time_hint_l)
+    {
+      lv_label_set_text(s_time_hint_l,
+                        dm_t("按设备本地时间调整", "Adjust device local time"));
+    }
+  dm_show(PAGE_TIME_SET);
+}
+
+static void create_time_set_page(void)
+{
+  lv_obj_t *page = mk_page(PAGE_TIME_SET);
+  lv_obj_t *back;
+  lv_obj_t *title;
+  lv_obj_t *apply;
+
+  lv_obj_set_style_bg_color(page, lv_color_hex(MD_SURFACE), LV_PART_MAIN);
+  back = dm_btn(page, "←", "<", 34, 24, MD_SURFACE_HIGH,
+                MD_ON_SURFACE, time_back_cb, NULL);
+  lv_obj_set_pos(back, 8, 6);
+  title = dm_lbl(page, "日期与时间", "Date & time", g_dm_font_m,
+                 MD_ON_SURFACE);
+  lv_obj_set_pos(title, 48, 7);
+
+  s_time_now_l = dm_lbl(page, "系统时间不可用", "Clock unavailable",
+                        g_dm_font_s, MD_ON_SURFACE_VARIANT);
+  lv_obj_set_width(s_time_now_l, 304);
+  lv_obj_set_style_text_align(s_time_now_l, LV_TEXT_ALIGN_CENTER,
+                              LV_PART_MAIN);
+  lv_obj_set_pos(s_time_now_l, 8, 34);
+
+  time_make_field(page, 0, 8, 62, 104, "年", "Year");
+  time_make_field(page, 1, 112, 62, 92, "月", "Month");
+  time_make_field(page, 2, 204, 62, 108, "日", "Day");
+  time_make_field(page, 3, 48, 119, 104, "时", "Hour");
+  time_make_field(page, 4, 168, 119, 104, "分", "Minute");
+
+  apply = dm_btn(page, "应用时间", "Apply time", 132, 30,
+                 MD_PRIMARY, MD_ON_PRIMARY, time_apply_cb, NULL);
+  lv_obj_align(apply, LV_ALIGN_TOP_MID, 0, 173);
+
+  s_time_hint_l = dm_lbl(page, "手动设定后 NTP 可自动校正",
+                         "NTP can correct a manual time later",
+                         g_dm_font_s, MD_ON_SURFACE_VARIANT);
+  lv_obj_set_width(s_time_hint_l, 312);
+  lv_obj_set_style_text_align(s_time_hint_l, LV_TEXT_ALIGN_CENTER,
+                              LV_PART_MAIN);
+  lv_obj_set_pos(s_time_hint_l, 4, 210);
+  time_init_fields();
+  time_refresh_labels();
+}
+
 /* ---------- pages ---------- */
 
 void dm_create_settings(void)
@@ -668,6 +1017,24 @@ void dm_create_settings(void)
                             LV_PART_KNOB);
   lv_obj_add_event_cb(s_wifi_sw, wifi_switch_cb, LV_EVENT_VALUE_CHANGED,
                       NULL);
+
+  /* Manual date/time page, available when network time is unreachable. */
+  {
+    lv_obj_t *c_time = card(sc, 56);
+    lv_obj_set_width(c_time, 288);
+    lv_obj_add_flag(c_time, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(c_time, open_time_set, LV_EVENT_CLICKED, NULL);
+    name = dm_lbl(c_time, "日期与时间", "Date & time", g_dm_font_s, C_INK);
+    lv_obj_set_pos(name, 0, 2);
+    {
+      lv_obj_t *sub = dm_lbl(c_time, "手动校准设备本地时钟",
+                             "Set device local clock manually",
+                             g_dm_font_s, C_MUTED);
+      lv_obj_set_pos(sub, 0, 22);
+    }
+    arrow = dm_lbl(c_time, "›", "›", g_dm_font_m, C_MUTED);
+    lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -4, 0);
+  }
 
   /* App Connect entry */
   lv_obj_t *c_app = card(sc, 56);
@@ -731,6 +1098,8 @@ void dm_create_settings(void)
                          g_dm_font_s, C_MUTED);
     lv_obj_set_pos(v, 0, 20);
   }
+
+  create_time_set_page();
 }
 
 void dm_create_wifi(void)
@@ -936,6 +1305,11 @@ void dm_create_wifi(void)
 void dm_wifi_tick(void)
 {
   dm_wifi_poll();
+
+  if (g_dm.page == PAGE_TIME_SET && (++s_time_tick & 3) == 0)
+    {
+      time_refresh_labels();
+    }
 
   if (dm_wifi_link_lost())
     {

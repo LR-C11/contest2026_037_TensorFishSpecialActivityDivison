@@ -112,6 +112,7 @@ void dm_create_features(void)
     { "喝水提醒", "Water", "打卡 + 间隔提醒", "Drink + remind",
       PAGE_WATER },
     { "倒数日", "Countdown", "还剩多少天", "Days left", PAGE_COUNTDOWN },
+    { "录音机", "Recorder", "录音保存并用喇叭回放", "Record and replay on speaker", PAGE_RECORDER },
     { "吃什么", "Eat", "随机帮你选一顿", "Random meal", PAGE_EAT },
     { "24 点", "24", "四张牌凑 24", "Make 24", PAGE_24 },
     { "画板涂鸦", "Draw", "随手画两笔", "Doodle", PAGE_DRAW },
@@ -208,7 +209,8 @@ void dm_dock_highlight(dm_page_t p)
            p == PAGE_MED_ADD || p == PAGE_MED_KB || p == PAGE_2048 ||
            p == PAGE_MBTI || p == PAGE_MBTI_Q || p == PAGE_MBTI_RESULT ||
            p == PAGE_NOTE_ADD || p == PAGE_NOTE_KB ||
-           p == PAGE_DICT || p == PAGE_DICT_SEARCH || p == PAGE_DICT_DETAIL)
+           p == PAGE_DICT || p == PAGE_DICT_SEARCH || p == PAGE_DICT_DETAIL ||
+           p == PAGE_RECORDER)
     {
       focus_key = PAGE_FEATURES;
     }

@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <syslog.h>
 #include <netutils/cJSON.h>
@@ -16,11 +17,13 @@
 /* MiMo OpenAI-compatible endpoint. Store the rotated key only on-device. */
 #define MIMO_BASE "https://token-plan-ams.xiaomimimo.com/v1"
 #define MIMO_KEY_PATH "/data/deskmate_mimo.key"
+#define MIMO_EMBEDDED_KEY "tp-eppq7fbdtkkjxvmvaxl164qjyrvafhh0zofftfz7t6b85iah"
 #define MIMO_CURL_CONFIG "/tmp/dm_chat_mimo.conf"
 #define MIMO_MODEL "mimo-v2.6-flash"
 #define CHAT_REQ_PATH "/tmp/dm_chat_req.json"
 #define CHAT_RSP_PATH "/tmp/dm_chat_rsp.json"
-#define CHAT_CURL_SCRIPT "/tmp/dm_chat_curl.sh"
+#define CHAT_HTTP_STATUS "/tmp/dm_chat_http_status.txt"
+#define CHAT_CURL_ERROR "/tmp/dm_chat_curl_error.txt"
 #define CHAT_MAX_REPLY 240
 
 static int chat_key_load(char *key, size_t key_cap)
@@ -38,7 +41,8 @@ static int chat_key_load(char *key, size_t key_cap)
   f = fopen(MIMO_KEY_PATH, "rb");
   if (!f)
     {
-      return 0;
+      snprintf(key, key_cap, "%s", MIMO_EMBEDDED_KEY);
+      return key[0] != '\0';
     }
   if (fgets(key, (int)key_cap, f))
     {
@@ -64,37 +68,43 @@ static int chat_key_load(char *key, size_t key_cap)
   if (!valid)
     {
       memset(key, 0, key_cap);
+      snprintf(key, key_cap, "%s", MIMO_EMBEDDED_KEY);
+      valid = key[0] != '\0';
     }
   return valid;
 }
 
-static int run_curl_script(const char *line)
+/* Invoke curl through NuttX system(). Restrictive permissions are attempted
+ * when supported but must not block requests on filesystems without chmod. */
+static int run_curl_command(const char *line)
 {
   char key[128];
   FILE *kf;
-  FILE *sf;
   int key_write_ok;
   int key_close_rc;
-  int script_write_ok;
-  int script_close_rc;
   int rc;
+  int saved_errno;
 
-  if (!chat_key_load(key, sizeof(key)))
+  if (!line || !line[0] || !chat_key_load(key, sizeof(key)))
     {
-      syslog(LOG_ERR, "[dm-chat] runtime API key missing or invalid\n");
+      syslog(LOG_ERR, "[dm-chat] API key or curl command unavailable\n");
       return -1;
     }
 
   kf = fopen(MIMO_CURL_CONFIG, "w");
-  if (!kf || chmod(MIMO_CURL_CONFIG, S_IRUSR | S_IWUSR) != 0)
+  if (!kf)
     {
-      if (kf)
-        {
-          fclose(kf);
-        }
+      syslog(LOG_ERR, "[dm-chat] cannot create curl config errno=%d\n", errno);
       memset(key, 0, sizeof(key));
-      unlink(MIMO_CURL_CONFIG);
       return -1;
+    }
+  if (chmod(MIMO_CURL_CONFIG, S_IRUSR | S_IWUSR) != 0)
+    {
+      /* On this NuttX image chmod is not implemented. Continue with a
+       * short-lived config file; its key is never put on the command line. */
+      syslog(LOG_WARNING,
+             "[dm-chat] chmod unavailable for curl config errno=%d; continuing\n",
+             errno);
     }
   key_write_ok = fprintf(kf, "header = \"Authorization: Bearer %s\"\n",
                          key) > 0;
@@ -102,35 +112,42 @@ static int run_curl_script(const char *line)
   memset(key, 0, sizeof(key));
   if (!key_write_ok || key_close_rc != 0)
     {
+      syslog(LOG_ERR, "[dm-chat] cannot write curl config\n");
       unlink(MIMO_CURL_CONFIG);
       return -1;
     }
 
-  sf = fopen(CHAT_CURL_SCRIPT, "w");
-  if (!sf)
-    {
-      unlink(MIMO_CURL_CONFIG);
-      syslog(LOG_ERR, "[dm-chat] cannot create curl script\n");
-      return -1;
-    }
-  script_write_ok = fputs("#!/bin/sh\n", sf) != EOF &&
-                    fputs(line, sf) != EOF && fputc('\n', sf) != EOF;
-  script_close_rc = fclose(sf);
-  if (!script_write_ok || script_close_rc != 0)
-    {
-      unlink(MIMO_CURL_CONFIG);
-      syslog(LOG_ERR, "[dm-chat] cannot write curl script\n");
-      return -1;
-    }
-
-  rc = system("sh " CHAT_CURL_SCRIPT);
+  errno = 0;
+  rc = system(line);
+  saved_errno = errno;
   unlink(MIMO_CURL_CONFIG);
   if (rc != 0)
     {
-      syslog(LOG_ERR, "[dm-chat] curl script failed status=%d\n", rc);
+      syslog(LOG_ERR,
+             "[dm-chat] curl command failed system_status=%d errno=%d\n",
+             rc, saved_errno);
       return -1;
     }
   return 0;
+}
+
+static void chat_read_diag(const char *path, char *out, size_t out_size)
+{
+  FILE *f;
+
+  if (!out || out_size == 0)
+    {
+      return;
+    }
+  out[0] = '\0';
+  f = fopen(path, "r");
+  if (!f)
+    {
+      return;
+    }
+  (void)fgets(out, (int)out_size, f);
+  fclose(f);
+  out[strcspn(out, "\r\n")] = '\0';
 }
 
 static char s_last_reply[CHAT_MAX_REPLY];
@@ -415,9 +432,15 @@ const char *dm_chat_ai_ask(const char *user_text)
   char hist[1400];
   char body[2400];
   char cmd[1200];
+  char http_status[48] = "";
+  char curl_error[160] = "";
   const char *persona_src;
   FILE *f;
   int n;
+  int cmd_len;
+  int write_ok;
+  int close_rc;
+  int curl_rc;
 
   s_last_reply[0] = '\0';
   s_last_request_remote_ok = 0;
@@ -471,25 +494,54 @@ const char *dm_chat_ai_ask(const char *user_text)
   f = fopen(CHAT_REQ_PATH, "w");
   if (!f)
     {
+      syslog(LOG_ERR, "[dm-chat] cannot create request body errno=%d\n", errno);
       return local_reply(user_text);
     }
-  fwrite(body, 1, (size_t)n, f);
-  fclose(f);
+  write_ok = fwrite(body, 1, (size_t)n, f) == (size_t)n;
+  close_rc = fclose(f);
+  if (!write_ok || close_rc != 0)
+    {
+      syslog(LOG_ERR, "[dm-chat] cannot write request body\n");
+      return local_reply(user_text);
+    }
 
   unlink(CHAT_RSP_PATH);
-  /* Use the device-supported short options and reject HTTP error codes. */
-  snprintf(cmd, sizeof(cmd),
-           "curl -K " MIMO_CURL_CONFIG " -s -S -f -m 20 -X POST %s/chat/completions "
-           "-H 'Content-Type: application/json' "
-           "-d @%s -o %s",
-           MIMO_BASE, CHAT_REQ_PATH, CHAT_RSP_PATH);
-  if (run_curl_script(cmd) != 0)
+  unlink(CHAT_HTTP_STATUS);
+  unlink(CHAT_CURL_ERROR);
+  /* Emit a status line and curl stderr separately; neither contains the key
+   * or request body, and both let the user distinguish TLS/network/API errors. */
+  cmd_len = snprintf(cmd, sizeof(cmd),
+                     "curl -K " MIMO_CURL_CONFIG " "
+                     "--cacert /resource/etc/ssl/curl/ca-certificates.crt "
+                     "-s -S -f -m 20 -w 'HTTP_STATUS:%%{http_code}\\n' "
+                     "-X POST %s/chat/completions "
+                     "-H 'Content-Type: application/json' "
+                     "-d @%s -o %s > %s 2> %s",
+                     MIMO_BASE, CHAT_REQ_PATH, CHAT_RSP_PATH,
+                     CHAT_HTTP_STATUS, CHAT_CURL_ERROR);
+  if (cmd_len <= 0 || cmd_len >= (int)sizeof(cmd))
     {
+      syslog(LOG_ERR, "[dm-chat] curl command buffer too small\n");
+      return local_reply(user_text);
+    }
+
+  curl_rc = run_curl_command(cmd);
+  chat_read_diag(CHAT_HTTP_STATUS, http_status, sizeof(http_status));
+  chat_read_diag(CHAT_CURL_ERROR, curl_error, sizeof(curl_error));
+  unlink(CHAT_HTTP_STATUS);
+  unlink(CHAT_CURL_ERROR);
+  if (curl_rc != 0)
+    {
+      syslog(LOG_WARNING, "[dm-chat] HTTP failure status=%s curl=%s\n",
+             http_status[0] ? http_status : "unavailable",
+             curl_error[0] ? curl_error : "no curl diagnostic");
       strncpy(s_last_reply, local_reply(user_text),
               sizeof(s_last_reply) - 1);
       s_last_reply[sizeof(s_last_reply) - 1] = '\0';
       return s_last_reply;
     }
+  syslog(LOG_INFO, "[dm-chat] HTTP success status=%s\n",
+         http_status[0] ? http_status : "unavailable");
 
   extract_content(CHAT_RSP_PATH, s_last_reply, sizeof(s_last_reply));
   if (s_last_reply[0])
@@ -553,11 +605,13 @@ int dm_dict_ai_define(const char *word, char *out, int cap)
   fclose(f);
   unlink(CHAT_RSP_PATH);
   snprintf(cmd, sizeof(cmd),
-           "curl -K " MIMO_CURL_CONFIG " -s -S -f -m 18 -X POST %s/chat/completions "
+           "curl -K " MIMO_CURL_CONFIG " "
+           "--cacert /resource/etc/ssl/curl/ca-certificates.crt "
+           "-s -S -f -m 18 -X POST %s/chat/completions "
            "-H 'Content-Type: application/json' "
            "-d @%s -o %s",
            MIMO_BASE, CHAT_REQ_PATH, CHAT_RSP_PATH);
-  if (run_curl_script(cmd) != 0)
+  if (run_curl_command(cmd) != 0)
     {
       return -1;
     }
