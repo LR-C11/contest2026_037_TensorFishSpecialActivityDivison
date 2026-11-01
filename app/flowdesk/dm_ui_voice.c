@@ -70,7 +70,7 @@ static void request_preview(int profile_idx)
   s_preview_done = 0;
 
   pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 24576);
+  pthread_attr_setstacksize(&attr, DM_VOICE_NET_WORKER_STACK);
   ret = pthread_create(&th, &attr, voice_preview_worker, job);
   pthread_attr_destroy(&attr);
   if (ret == 0)
@@ -102,10 +102,10 @@ void dm_voice_sel_tick(void)
     {
       lv_label_set_text(s_tip_l,
                         s_preview_ok
-                          ? dm_t("音色试听完成，样本已缓存",
-                                 "Voice preview cached in /data")
-                          : dm_t("试听失败：检查网络时间和API密钥",
-                                 "Preview failed: check time, network and API key"));
+          ? dm_t("试听完成（内置音色/缓存）",
+                 "Preview played (bundled/cache)")
+          : dm_t("试听失败：检查音频输出、资源或网络",
+                 "Preview failed: check audio, resources or network"));
     }
 }
 
@@ -154,7 +154,7 @@ static void preview(lv_event_t *e)
     {
       lv_label_set_text(s_tip_l, dm_t("试听中…", "Playing…"));
     }
-  /* Generate the selected voice sample once, cache it in /data, then replay. */
+  /* Bundled samples play offline; remaining voices generate/cache on first use. */
   request_preview(dm_voice_profile_sel());
 }
 
@@ -261,8 +261,8 @@ void dm_create_voice_sel(void)
       }
   }
 
-  s_tip_l = dm_lbl(s_page, "首次联网生成，之后可离线试听",
-                   "Generate once online; replay offline",
+  s_tip_l = dm_lbl(s_page, "冰糖/茉莉/苏打内置离线试听",
+                   "3 bundled offline previews",
                    g_dm_font_s, MD_ON_SURFACE_VARIANT);
   lv_obj_set_pos(s_tip_l, 12, 232);
 

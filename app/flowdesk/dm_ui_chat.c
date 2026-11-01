@@ -140,6 +140,13 @@ static void *voice_worker(void *arg)
            * generic recognition failure. */
           switch (dm_voice_last_failure())
             {
+              case DM_VOICE_FAILURE_WIFI:
+                snprintf(s_out_ans, sizeof(s_out_ans), "%s",
+                         dm_t("Wi-Fi 尚未连接", "Wi-Fi is not connected"));
+                snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                         dm_t("正在等待网络；连接后再试", "Wait for Wi-Fi, then try again"));
+                break;
+
               case DM_VOICE_FAILURE_TIME:
                 snprintf(s_out_ans, sizeof(s_out_ans), "%s",
                          dm_t("设备时间尚未同步", "Device time is not synced"));
@@ -231,7 +238,7 @@ static void kick_job(int job)
   set_ptt("处理中…", "Working…", C_BTN_HI);
 
   pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 24576);
+  pthread_attr_setstacksize(&attr, DM_VOICE_NET_WORKER_STACK);
   if (pthread_create(&th, &attr, voice_worker, NULL) == 0)
     {
       pthread_detach(th);
@@ -281,6 +288,15 @@ static void ptt_click(lv_event_t *e)
 
   if (!s_ui_rec)
     {
+      if (!dm_wifi_connected())
+        {
+          set_ans(dm_t("Wi-Fi 尚未就绪，请先连接网络",
+                       "Wi-Fi is not ready; connect first"));
+          set_sub(dm_t("连接完成后再开始语音聊天",
+                       "Start voice chat after connection completes"));
+          set_ptt("开始说话", "Start talk", C_BTN);
+          return;
+        }
       s_mic_err = 0;
       dm_voice_set_speaker_volume(80);
       rec_rc = dm_voice_rec_start(6);
@@ -288,9 +304,9 @@ static void ptt_click(lv_event_t *e)
         {
           if (rec_rc == -EBUSY)
             {
-              set_ans(dm_t("喇叭正在播放，请稍后再录",
-                           "Speaker is busy; try recording again"));
-              set_sub(dm_t("等待音频播放结束", "Wait for audio to finish"));
+              set_ans(dm_t("音频设备忙，请稍后再试",
+                           "Audio device busy; try again shortly"));
+              set_sub(dm_t("等待录音或播放结束", "Wait for recording or playback to finish"));
             }
           else
             {

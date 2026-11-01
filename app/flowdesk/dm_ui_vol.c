@@ -6,6 +6,7 @@
 #include "deskmate.h"
 #include "dm_audio_vol.h"
 #include "dm_audio_route.h"
+#include "dm_voice.h"
 
 #ifdef CONFIG_DESKMATE_APP
 
@@ -130,7 +131,7 @@ static void btn_test(lv_event_t *e)
     }
 
   pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 16384);
+  pthread_attr_setstacksize(&attr, DM_VOICE_NET_WORKER_STACK);
   ret = pthread_create(&th, &attr, test_beep_worker, NULL);
   pthread_attr_destroy(&attr);
   if (ret == 0)
@@ -162,8 +163,8 @@ void dm_volume_tick(void)
       if (s_test_ok == 0)
         {
           lv_label_set_text(s_hint,
-                            dm_t("试听语音已生成并缓存",
-                                 "Speech sample ready and cached"));
+                            dm_t("试听完成（预置音色或缓存）",
+                                 "Preview finished (bundled or cached)"));
         }
       else if (s_test_ok > 0)
         {
