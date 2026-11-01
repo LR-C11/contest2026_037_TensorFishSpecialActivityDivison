@@ -13,6 +13,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <errno.h>
+#include <time.h>
 
 #define CHAT_LINE_MAX 96
 #define CHAT_FACE_SZ 76
@@ -24,6 +26,7 @@ static volatile bool s_busy;
 static volatile bool s_ui_rec;
 static volatile int s_job;
 static volatile int s_rec_sec;
+static uint64_t s_rec_started_ms;
 static volatile int s_mic_err;
 static volatile int s_out_ready; /* 1=text 2=microphone error */
 
@@ -31,6 +34,17 @@ static char s_pending[CHAT_LINE_MAX];
 static char s_last_ans[CHAT_LINE_MAX];
 static char s_out_ans[CHAT_LINE_MAX];
 static char s_out_sub[80];
+
+static uint64_t chat_monotonic_ms(void)
+{
+  struct timespec ts;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    {
+      return 0;
+    }
+  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
 
 static void set_ans(const char *text)
 {
@@ -76,6 +90,7 @@ static void reset_to_idle(void)
 {
   s_ui_rec = false;
   s_rec_sec = 0;
+  s_rec_started_ms = 0;
   s_busy = false;
   s_job = 0;
   set_ptt("开始说话", "Start talk", C_BTN);
@@ -85,28 +100,78 @@ static void reset_to_idle(void)
 static void *voice_worker(void *arg)
 {
   char reply[CHAT_LINE_MAX];
+  int voice_rc;
 
   (void)arg;
 
   if (s_job == 1)
     {
+      /* nxrecorder_stop() joins its audio worker.  Never call it from the
+       * LVGL click callback: a slow/failed PCM read must not freeze the UI. */
+      if (dm_voice_rec_stop() != 0)
+        {
+          snprintf(s_out_ans, sizeof(s_out_ans), "%s",
+                   dm_t("录音失败，未采集到有效音频",
+                        "Recording failed; no audio captured"));
+          snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                   dm_t("检查麦克风和 /dev/audio/pcm0c",
+                        "Check the microphone and /dev/audio/pcm0c"));
+          s_out_ready = 1;
+          return NULL;
+        }
+
       snprintf(s_out_sub, sizeof(s_out_sub), "%s",
                dm_t("ASR → 模型 → 喇叭播报", "ASR → LLM → speaker"));
-      if (dm_voice_asr_chat_tts("/tmp/dm_voice_in.wav", reply,
-                                sizeof(reply)) == 0)
+      voice_rc = dm_voice_asr_chat_tts("/tmp/dm_voice_in.wav", reply,
+                                       sizeof(reply));
+      if (voice_rc >= 0)
         {
           snprintf(s_out_ans, sizeof(s_out_ans), "%s", reply);
           snprintf(s_out_sub, sizeof(s_out_sub), "%s",
-                   dm_t("已通过喇叭播放回复", "Reply played on speaker"));
+                   voice_rc == 0
+                     ? dm_t("已通过喇叭播放回复", "Reply played on speaker")
+                     : dm_t("文字回复已显示，语音播报失败",
+                            "Text reply shown; speech playback failed"));
           s_out_ready = 1;
         }
       else
         {
-          snprintf(s_out_ans, sizeof(s_out_ans), "%s",
-                   dm_t("没听清或网络忙，再说一次？",
-                        "Didn't catch that, try again"));
-          snprintf(s_out_sub, sizeof(s_out_sub), "%s",
-                   dm_t("检查麦克风 / 网络", "Check mic / network"));
+          /* Report the actual blocking condition instead of masking it as a
+           * generic recognition failure. */
+          switch (dm_voice_last_failure())
+            {
+              case DM_VOICE_FAILURE_TIME:
+                snprintf(s_out_ans, sizeof(s_out_ans), "%s",
+                         dm_t("设备时间尚未同步", "Device time is not synced"));
+                snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                         dm_t("网络时间就绪后再试，TLS证书校验未关闭",
+                              "Retry after network time sync; TLS validation remains on"));
+                break;
+
+              case DM_VOICE_FAILURE_API_KEY:
+                snprintf(s_out_ans, sizeof(s_out_ans), "%s",
+                         dm_t("MiMo API密钥未配置", "MiMo API key is not configured"));
+                snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                         dm_t("将新密钥保存到 /data/deskmate_mimo.key",
+                              "Save a rotated key to /data/deskmate_mimo.key"));
+                break;
+
+              case DM_VOICE_FAILURE_CHAT:
+                snprintf(s_out_ans, sizeof(s_out_ans), "%s",
+                         dm_t("语音对话请求失败", "Voice chat request failed"));
+                snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                         dm_t("检查网络/API状态，或点脸使用文字聊天",
+                              "Check network/API status or tap the face for text chat"));
+                break;
+
+              default:
+                snprintf(s_out_ans, sizeof(s_out_ans), "%s",
+                         dm_t("语音识别失败，请重试", "Speech recognition failed"));
+                snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                         dm_t("检查录音和麦克风，或点脸使用文字聊天",
+                              "Check recording/mic or tap the face for text chat"));
+                break;
+            }
           s_out_ready = 1;
         }
     }
@@ -114,11 +179,25 @@ static void *voice_worker(void *arg)
     {
       const char *r = dm_chat_ai_ask(s_pending);
       snprintf(s_out_ans, sizeof(s_out_ans), "%s", r ? r : "……");
-      if (r && r[0])
+      if (r && r[0] && dm_chat_ai_remote_ok())
         {
-          (void)dm_voice_tts_play(r);
+          if (dm_voice_tts_play(r) == 0)
+            {
+              snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                       dm_t("已通过喇叭播放回复", "Reply played on speaker"));
+            }
+          else
+            {
+              snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                       dm_t("文字回复已显示，语音播报失败",
+                            "Text reply shown; speech playback failed"));
+            }
+        }
+      else if (r && r[0])
+        {
           snprintf(s_out_sub, sizeof(s_out_sub), "%s",
-                   dm_t("已通过喇叭播放回复", "Reply played on speaker"));
+                   dm_t("云端连接失败，当前显示离线回复",
+                        "Cloud unavailable; showing offline reply"));
         }
       else
         {
@@ -160,7 +239,18 @@ static void kick_job(int job)
   else
     {
       s_busy = false;
-      set_ptt("开始说话", "Start talk", C_BTN);
+      if (job == 1 && dm_voice_rec_active())
+        {
+          /* Keep the recording controllable if worker creation failed. */
+          s_ui_rec = true;
+          set_ans(dm_t("正在录音，稍后再点结束",
+                       "Recording; tap stop again"));
+          set_ptt("结束并发送", "Stop & send", C_HEART);
+        }
+      else
+        {
+          set_ptt("开始说话", "Start talk", C_BTN);
+        }
     }
   pthread_attr_destroy(&attr);
 }
@@ -180,6 +270,8 @@ static void face_click(lv_event_t *e)
 
 static void ptt_click(lv_event_t *e)
 {
+  int rec_rc;
+
   (void)e;
 
   if (s_busy)
@@ -191,15 +283,27 @@ static void ptt_click(lv_event_t *e)
     {
       s_mic_err = 0;
       dm_voice_set_speaker_volume(80);
-      if (dm_voice_rec_start(12) != 0)
+      rec_rc = dm_voice_rec_start(6);
+      if (rec_rc != 0)
         {
-          set_ans(dm_t("麦克风不可用", "Mic unavailable"));
-          set_sub(dm_t("检查 /dev/audio/pcm0c", "Check /dev/audio/pcm0c"));
+          if (rec_rc == -EBUSY)
+            {
+              set_ans(dm_t("喇叭正在播放，请稍后再录",
+                           "Speaker is busy; try recording again"));
+              set_sub(dm_t("等待音频播放结束", "Wait for audio to finish"));
+            }
+          else
+            {
+              set_ans(dm_t("麦克风不可用", "Mic unavailable"));
+              set_sub(dm_t("检查 /dev/audio/pcm0c",
+                           "Check /dev/audio/pcm0c"));
+            }
           set_ptt("开始说话", "Start talk", C_BTN);
           return;
         }
       s_ui_rec = true;
       s_rec_sec = 0;
+      s_rec_started_ms = chat_monotonic_ms();
       dm_face_set(FACE_THINK, EYE_DECOR_NONE, 10);
       set_ans(dm_t("● 录音中… 再点一下结束并发送",
                    "● Recording… tap again to send"));
@@ -213,8 +317,6 @@ static void ptt_click(lv_event_t *e)
       set_ptt("发送中…", "Sending…", C_BTN_HI);
       set_ans(dm_t("正在结束录音…", "Stopping mic…"));
 
-      (void)dm_voice_rec_stop();
-
       if (s_mic_err)
         {
           set_ans(dm_t("麦克风故障，无法录音", "Mic failed"));
@@ -223,6 +325,7 @@ static void ptt_click(lv_event_t *e)
           return;
         }
 
+      /* Stop/join and network work run in voice_worker, not this LVGL event. */
       kick_job(1);
     }
 }
@@ -305,7 +408,11 @@ void dm_chat_tick(void)
   if (s_ui_rec && !s_busy)
     {
       char buf[80];
-      s_rec_sec++;
+      uint64_t now_ms = chat_monotonic_ms();
+      if (s_rec_started_ms != 0 && now_ms >= s_rec_started_ms)
+        {
+          s_rec_sec = (int)((now_ms - s_rec_started_ms) / 1000);
+        }
       if (dm_voice_rec_active())
         {
           snprintf(buf, sizeof(buf),
@@ -318,14 +425,20 @@ void dm_chat_tick(void)
         }
       else
         {
+          s_ui_rec = false;
           if (s_rec_sec < 2)
             {
               s_mic_err = 1;
               set_ans(dm_t("麦克风故障，无法录音", "Mic failed"));
               set_sub(dm_t("检查 /dev/audio/pcm0c", "Check mic device"));
+              reset_to_idle();
             }
-          s_ui_rec = false;
-          reset_to_idle();
+          else
+            {
+              /* Recording auto-stop reached the configured limit.  Send the
+               * captured WAV instead of silently discarding it. */
+              kick_job(1);
+            }
         }
     }
 }

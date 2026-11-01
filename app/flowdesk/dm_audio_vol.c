@@ -15,16 +15,61 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <syslog.h>
 #include <sys/ioctl.h>
 #include <nuttx/audio/audio.h>
-#include "media_player.h"
-#include "media_defs.h"
+#include <aw-alsa-lib/control.h>
+#include "dm_voice.h"
 
 #define VOL_PATH "/data/deskmate_vol.txt"
 #define VOL_DEFAULT 80
+#define CODEC_CARD "audiocodec"
+#define DAC_VOL_MAX 160
 
 static int s_vol = VOL_DEFAULT;
 static int s_mute;
+
+/* Perceptual slider mapping: lift the quiet half of the range, while
+ * reserving headroom at the top to avoid the previous full-scale loudness. */
+static unsigned int vol_percent_to_reg(int percent)
+{
+  static const struct
+  {
+    unsigned char percent;
+    unsigned char reg;
+  } points[] =
+  {
+    { 0,   0 },
+    { 10, 48 },
+    { 25, 88 },
+    { 50, 124 },
+    { 75, 148 },
+    { 100, DAC_VOL_MAX }
+  };
+  unsigned int i;
+
+  if (percent <= 0)
+    {
+      return 0;
+    }
+  if (percent >= 100)
+    {
+      return DAC_VOL_MAX;
+    }
+
+  for (i = 1; i < sizeof(points) / sizeof(points[0]); i++)
+    {
+      if (percent <= points[i].percent)
+        {
+          unsigned int span = points[i].percent - points[i - 1].percent;
+          unsigned int value_span = points[i].reg - points[i - 1].reg;
+          unsigned int offset = (unsigned int)percent - points[i - 1].percent;
+          return points[i - 1].reg + (value_span * offset + span / 2) / span;
+        }
+    }
+
+  return DAC_VOL_MAX;
+}
 
 static void vol_save(void)
 {
@@ -83,47 +128,19 @@ int dm_vol_set_mute(int on)
 
 void dm_vol_apply(void)
 {
-  struct audio_caps_desc_s cap;
-  int fd;
-  int dev_vol;
+  unsigned int reg;
+  int r1, r2;
 
-  if (s_mute)
-    {
-      dev_vol = 0;
-    }
-  else
-    {
-      dev_vol = s_vol * 10; /* 0..100 -> 0..1000 */
-      if (dev_vol > 1000)
-        {
-          dev_vol = 1000;
-        }
-    }
+  /* CONFIG_AUDIO_EXCLUDE_VOLUME=y strips the AUDIO_FU_VOLUME ioctl path,
+     so drive DACL/R digital volume through aw-alsa-lib controls instead. */
 
-  fd = open("/dev/audio/pcm0p", O_WRONLY);
-  if (fd < 0)
-    {
-      /* device may be busy; try playback node used by nxplayer */
-      fd = open("/dev/audio/pcm0p", O_RDWR);
-    }
-  if (fd < 0)
-    {
-      return;
-    }
-
-  memset(&cap, 0, sizeof(cap));
-  cap.caps.ac_len = sizeof(struct audio_caps_s);
-  cap.caps.ac_type = AUDIO_TYPE_FEATURE;
-  cap.caps.ac_format.hw = AUDIO_FU_VOLUME;
-  cap.caps.ac_controls.hw[0] = (uint16_t)dev_vol;
-  (void)ioctl(fd, AUDIOIOC_CONFIGURE, (unsigned long)&cap);
-  close(fd);
+  reg = s_mute ? 0 : vol_percent_to_reg(s_vol);
+  r1 = snd_ctl_set(CODEC_CARD, "DACL digital volume", reg);
+  r2 = snd_ctl_set(CODEC_CARD, "DACR digital volume", reg);
+  syslog(LOG_INFO, "[dm-vol] dac vol reg=%u (dACL=%d dACR=%d)\n", reg, r1, r2);
 
   /* also keep TTS helper in sync (percent, 0 when mute) */
-  {
-    extern void dm_voice_set_speaker_volume(int percent);
-    dm_voice_set_speaker_volume(s_mute ? 0 : s_vol);
-  }
+  dm_voice_set_speaker_volume(s_mute ? 0 : s_vol);
 }
 
 int dm_vol_set(int percent)
@@ -146,32 +163,24 @@ int dm_vol_set(int percent)
   return s_vol;
 }
 
-/* short 440Hz beep ~0.25s at 16kHz mono */
+/* Short 440Hz tone for offline proactive fallback. */
 int dm_vol_test_beep(void)
 {
-  void *mp;
-
   if (s_mute)
     {
       return -1;
     }
+  return dm_voice_beep();
+}
 
-  /* play prebaked tone via media framework (speaker 4ohm 3W) */
-  mp = media_player_open(MEDIA_STREAM_MUSIC);
-  if (!mp)
+/* Spoken sample for the Volume settings page. */
+int dm_vol_test_sample(void)
+{
+  if (s_mute)
     {
       return -1;
     }
-  if (media_player_prepare(mp, "/resource/audio/med.wav", NULL) != 0)
-    {
-      media_player_close(mp, 0);
-      return -1;
-    }
-  (void)media_player_start(mp);
-  usleep(400 * 1000);
-  (void)media_player_stop(mp);
-  (void)media_player_close(mp, 0);
-  return 0;
+  return dm_voice_volume_test();
 }
 
 #endif /* CONFIG_DESKMATE_APP */

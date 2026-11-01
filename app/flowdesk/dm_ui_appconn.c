@@ -235,6 +235,7 @@ void dm_appconn_tick(void)
 {
   static int s_pairing_latched;
 
+  dm_ble_poll();
   refresh_status();
 
   if (s_anim_done_flag)

@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <syslog.h>
@@ -347,6 +348,8 @@ static gatt_srv_db_t s_srv_db = {
 
 /* ---- gatts callbacks ---- */
 
+static int start_adv(void);
+
 static void on_connected(void *srv, bt_address_t *addr)
 {
   (void)srv;
@@ -371,12 +374,15 @@ static void on_disconnected(void *srv, bt_address_t *addr)
   syslog(LOG_INFO, "[ble-gatt] disconnected\n");
   s_has_peer = 0;
   s_auth_cccd = 0;
+  s_cmd_cccd = 0;
+  s_status_cccd = 0;
   s_pairing = 0;
-  s_paired = 0;
   s_challenge = 0;
+  /* keep s_paired/s_peer so a reconnect does not need re-pairing;
+     an explicit PAIR_REQ from a new device restarts pairing */
   if (s_adv)
     {
-      set_state(DM_BLE_ADVERTISING);
+      set_state(s_paired ? DM_BLE_PAIRED : DM_BLE_ADVERTISING);
     }
   else
     {
@@ -390,6 +396,16 @@ static void on_attr_table_added(void *srv, gatt_status_t status,
   (void)srv;
   syslog(LOG_INFO, "[ble-gatt] attr table added handle=%u status=%d\n",
          (unsigned)attr, (int)status);
+  if (status == GATT_STATUS_SUCCESS)
+    {
+      /* advertise only after the GATT table is really ready, otherwise a
+         fast central connects and discovers an empty service */
+      (void)start_adv();
+    }
+  else
+    {
+      set_state(DM_BLE_ERROR);
+    }
 }
 
 static void on_attr_table_removed(void *srv, gatt_status_t status,
@@ -568,33 +584,62 @@ static void stop_adv(void)
 
 /* ---- adapter ---- */
 
+static volatile int s_start_pending;
+
+static void do_register_and_adv(void)
+{
+  if (!s_srv)
+    {
+      bt_status_t ret = bt_gatts_register_service(s_ins, &s_srv,
+                                                 &s_gatts_cbs);
+      if (ret != BT_STATUS_SUCCESS || !s_srv)
+        {
+          syslog(LOG_ERR, "[ble-gatt] register service fail %d\n", (int)ret);
+          s_srv = NULL;
+          return;
+        }
+      /* start_adv() also fires from on_attr_table_added when ready */
+      bt_gatts_add_attr_table(s_srv, &s_srv_db);
+    }
+  (void)start_adv();
+}
+
+/* Called from the UI tick.  Registration/adv is deferred here instead of
+   running inside the adapter callback: doing it while the stack is still
+   in HCI init raced zblue into a kernel oops and no advertisement ever
+   started.  Keeps retrying every ~2s while starting. */
+void dm_ble_poll(void)
+{
+  static int ticks;
+
+  if (!s_start_pending || s_state != DM_BLE_STARTING)
+    {
+      ticks = 0;
+      return;
+    }
+  if (++ticks < 8) /* ~2s settle for zblue HCI init */
+    {
+      return;
+    }
+  ticks = 0;
+  if (!s_ins || bt_adapter_get_state(s_ins) != BT_ADAPTER_STATE_ON)
+    {
+      return;
+    }
+  do_register_and_adv();
+  if (s_adv)
+    {
+      s_start_pending = 0;
+    }
+}
+
 static void adapter_state_cb(void *cookie, bt_adapter_state_t state)
 {
   (void)cookie;
   syslog(LOG_INFO, "[ble-gatt] adapter state=%d\n", (int)state);
   if (state == BT_ADAPTER_STATE_ON)
     {
-      /* register service after adapter is up */
-      if (!s_srv)
-        {
-          bt_status_t ret = bt_gatts_register_service(s_ins, &s_srv,
-                                                     &s_gatts_cbs);
-          if (ret == BT_STATUS_SUCCESS && s_srv)
-            {
-              bt_gatts_add_attr_table(s_srv, &s_srv_db);
-              start_adv();
-            }
-          else
-            {
-              syslog(LOG_ERR, "[ble-gatt] register service fail %d\n",
-                     (int)ret);
-              set_state(DM_BLE_ERROR);
-            }
-        }
-      else if (!s_adv)
-        {
-          start_adv();
-        }
+      s_start_pending = 1;
     }
 }
 
@@ -613,6 +658,7 @@ int dm_ble_start(void)
   s_paired = 0;
   s_pairing = 0;
   s_has_peer = 0;
+  srand((unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)s_ins);
 
   if (!s_ins)
     {
@@ -632,8 +678,17 @@ int dm_ble_start(void)
 
   if (bt_adapter_enable(s_ins) != BT_STATUS_SUCCESS)
     {
-      /* may already be on — try register/adv directly */
-      adapter_state_cb(NULL, BT_ADAPTER_STATE_ON);
+      /* may already be on — verify before registering */
+      if (bt_adapter_get_state(s_ins) == BT_ADAPTER_STATE_ON)
+        {
+          adapter_state_cb(NULL, BT_ADAPTER_STATE_ON);
+        }
+      else
+        {
+          syslog(LOG_ERR, "[ble-gatt] adapter enable fail\n");
+          set_state(DM_BLE_ERROR);
+          return -1;
+        }
     }
   return 0;
 }
@@ -650,6 +705,7 @@ void dm_ble_stop(void)
   s_pairing = 0;
   s_has_peer = 0;
   s_auth_cccd = 0;
+  s_start_pending = 0;
   set_state(DM_BLE_IDLE);
 }
 

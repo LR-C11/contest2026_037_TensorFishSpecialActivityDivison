@@ -313,12 +313,6 @@ static void open_app_conn(lv_event_t *e)
   dm_show(PAGE_APP_CONNECT);
 }
 
-static void open_btnet(lv_event_t *e)
-{
-  (void)e;
-  dm_show(PAGE_BT_NET);
-}
-
 static void open_voice_sel(lv_event_t *e)
 {
   (void)e;
@@ -674,21 +668,6 @@ void dm_create_settings(void)
                             LV_PART_KNOB);
   lv_obj_add_event_cb(s_wifi_sw, wifi_switch_cb, LV_EVENT_VALUE_CHANGED,
                       NULL);
-
-  /* BT Headset entry */
-  lv_obj_t *c_bt = card(sc, 56);
-  lv_obj_set_width(c_bt, 288);
-  lv_obj_add_flag(c_bt, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(c_bt, open_btnet, LV_EVENT_CLICKED, NULL);
-  name = dm_lbl(c_bt, "蓝牙耳机", "BT Headset", g_dm_font_s, C_INK);
-  lv_obj_set_pos(name, 0, 2);
-  {
-    lv_obj_t *sub = dm_lbl(c_bt, "连接 A2DP 蓝牙耳机", "A2DP headset",
-                           g_dm_font_s, C_MUTED);
-    lv_obj_set_pos(sub, 0, 22);
-  }
-  arrow = dm_lbl(c_bt, "›", "›", g_dm_font_m, C_MUTED);
-  lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -4, 0);
 
   /* App Connect entry */
   lv_obj_t *c_app = card(sc, 56);

@@ -12,16 +12,17 @@
 
 #define VOICE_CFG "/data/deskmate_voice.txt"
 
-/* Multi-style voices: cloud id + offline pitch */
+/* MiMo-V2.5-TTS preset voice IDs. */
 static const dm_voice_profile_t s_profiles[] = {
-  { "冰糖",     "alloy",   780, 0 },  /* 清亮女声 */
-  { "茉莉",     "nova",    620, 0 },  /* 温柔女声 */
-  { "小云",     "shimmer", 900, 0 },  /* 活泼女声 */
-  { "苏打",     "echo",    420, 0 },  /* 阳光男声 */
-  { "白桦",     "onyx",    280, 0 },  /* 沉稳男声 */
-  { "小川",     "fable",   360, 0 },  /* 青年男声 */
-  { "电子音",   "alloy",   1100, 1 }, /* 离线高音提示 */
-  { "深海",     "onyx",    180, 1 },  /* 离线低音提示 */
+  { "默认",     "mimo_default", 780, 0 },
+  { "冰糖",     "冰糖",         780, 0 },
+  { "茉莉",     "茉莉",         620, 0 },
+  { "苏打",     "苏打",         420, 0 },
+  { "白桦",     "白桦",         280, 0 },
+  { "Mia",      "Mia",          780, 0 },
+  { "Chloe",    "Chloe",        700, 0 },
+  { "Milo",     "Milo",         420, 0 },
+  { "Dean",     "Dean",         360, 0 },
 };
 
 #define NPROF ((int)(sizeof(s_profiles) / sizeof(s_profiles[0])))

@@ -12,7 +12,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.18.1"
+#define DM_VER "0.18.2"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -64,7 +64,6 @@ typedef enum {
   PAGE_NOTE_KB,
   PAGE_SETTINGS,
   PAGE_WIFI,
-  PAGE_BT_NET,
   PAGE_APP_CONNECT,
   PAGE_WIFI_PW,
   PAGE_WIFI_KB,
@@ -238,15 +237,21 @@ void dm_create_mbti(void);
 void dm_create_dict(void);
 void dm_create_volume(void);
 void dm_create_voice_sel(void);
+void dm_voice_sel_tick(void);
 void dm_create_about(void);
 void dm_voice_profile_init(void);
 void dm_proactive_tick(void);
 void dm_proactive_focus_done(int32_t minutes);
 int dm_dict_ai_define(const char *word, char *out, int cap);
 void dm_chat_tick(void);
+void dm_volume_tick(void);
 int dm_chat_ai_available(void);
 const char *dm_chat_ai_ask(const char *user_text);
+int dm_chat_ai_remote_ok(void);
 const char *dm_chat_local_reply(const char *user_text);
+void dm_chat_hist_reset(void);
+void dm_chat_hist_push(const char *user, const char *assistant);
+int dm_chat_hist_json(char *out, int cap);
 void dm_create_supervise(void);
 void dm_create_dock(void);
 void dm_dock_highlight(dm_page_t p);
@@ -271,7 +276,6 @@ int dm_health_score(void);
 void dm_create_settings(void);
 void dm_create_features(void);
 void dm_create_wifi(void);
-void dm_create_btnet(void);
 void dm_create_app_connect(void);
 void dm_create_word(void);
 void dm_create_tools(void);
@@ -285,7 +289,6 @@ void dm_life_tick(void);
 void dm_fun_tick(void);
 void dm_med_tick(void);
 void dm_wifi_tick(void);
-void dm_btnet_tick(void);
 void dm_appconn_tick(void);
 int dm_wifi_start_scan(void);
 int dm_wifi_connect(const char *ssid, const char *pass);
@@ -293,6 +296,7 @@ void dm_wifi_auto_start(void);
 const char *dm_wifi_cur_ssid(void);
 const char *dm_wifi_cur_ip(void);
 int dm_wifi_connected(void);
+int dm_wifi_wait_time_sync(int timeout_sec);
 int dm_wifi_enabled(void);
 int dm_wifi_set_enabled(int on);
 void dm_wifi_poll(void);
