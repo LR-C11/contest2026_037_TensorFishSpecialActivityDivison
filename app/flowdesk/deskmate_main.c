@@ -92,7 +92,7 @@ int flowdesk_main(int argc, FAR char *argv[])
   dm_create_note();
   dm_create_settings();
   dm_create_wifi();
-  dm_create_btnet();
+  dm_wifi_auto_start();
   dm_create_app_connect();
   dm_create_dock();
   dm_show(PAGE_FOCUS_HOME);

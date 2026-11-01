@@ -15,11 +15,33 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 static int s_med_ann_hour = -1;
 static int s_water_ann_min = -1;
 static int s_brief_ann_day = -1;
 static int s_focus_ann = -1;
+
+static void *proactive_beep_worker(void *arg)
+{
+  (void)arg;
+  (void)dm_vol_test_beep();
+  return NULL;
+}
+
+static void proactive_beep_async(void)
+{
+  pthread_t th;
+  pthread_attr_t attr;
+
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 16384);
+  if (pthread_create(&th, &attr, proactive_beep_worker, NULL) == 0)
+    {
+      pthread_detach(th);
+    }
+  pthread_attr_destroy(&attr);
+}
 
 /* play local wav via same path as TTS output */
 static void say_offline(const char *wav_rel, const char *text)
@@ -48,8 +70,8 @@ static void say_offline(const char *wav_rel, const char *text)
         }
     }
 
-  /* last resort: short beep */
-  (void)dm_vol_test_beep();
+  /* Last resort: do not let audio waits block the LVGL timer callback. */
+  proactive_beep_async();
   if (text)
     {
       dm_say(text, text);

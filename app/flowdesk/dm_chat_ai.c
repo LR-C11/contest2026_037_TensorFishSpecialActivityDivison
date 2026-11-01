@@ -8,34 +8,133 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <syslog.h>
+#include <netutils/cJSON.h>
 
 #ifdef CONFIG_DESKMATE_APP
 
-/* MiMo OpenAI-compatible endpoint (user-provided key for this device). */
-#define MIMO_BASE "https://token-plan-sgp.xiaomimimo.com/v1"
-#define MIMO_KEY  "tp-s8f46wpkkkdpqika5xchqalgg7m632kp0n9wdd9omjlnn64c"
+/* MiMo OpenAI-compatible endpoint. Store the rotated key only on-device. */
+#define MIMO_BASE "https://token-plan-ams.xiaomimimo.com/v1"
+#define MIMO_KEY_PATH "/data/deskmate_mimo.key"
+#define MIMO_CURL_CONFIG "/tmp/dm_chat_mimo.conf"
 #define MIMO_MODEL "mimo-v2.6-flash"
 #define CHAT_REQ_PATH "/tmp/dm_chat_req.json"
 #define CHAT_RSP_PATH "/tmp/dm_chat_rsp.json"
+#define CHAT_CURL_SCRIPT "/tmp/dm_chat_curl.sh"
 #define CHAT_MAX_REPLY 240
+
+static int chat_key_load(char *key, size_t key_cap)
+{
+  FILE *f;
+  size_t i;
+  size_t n;
+  int valid = 0;
+
+  if (!key || key_cap < 16)
+    {
+      return 0;
+    }
+  key[0] = '\0';
+  f = fopen(MIMO_KEY_PATH, "rb");
+  if (!f)
+    {
+      return 0;
+    }
+  if (fgets(key, (int)key_cap, f))
+    {
+      n = strlen(key);
+      while (n > 0 && (key[n - 1] == '\r' || key[n - 1] == '\n' ||
+                       key[n - 1] == ' ' || key[n - 1] == '\t'))
+        {
+          key[--n] = '\0';
+        }
+      valid = n > 8 && n < key_cap - 1;
+      for (i = 0; valid && i < n; i++)
+        {
+          unsigned char ch = (unsigned char)key[i];
+          if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' ||
+                ch == '.'))
+            {
+              valid = 0;
+            }
+        }
+    }
+  fclose(f);
+  if (!valid)
+    {
+      memset(key, 0, key_cap);
+    }
+  return valid;
+}
 
 static int run_curl_script(const char *line)
 {
-  FILE *f = fopen("/tmp/dm_curl.sh", "w");
+  char key[128];
+  FILE *kf;
+  FILE *sf;
+  int key_write_ok;
+  int key_close_rc;
+  int script_write_ok;
+  int script_close_rc;
   int rc;
-  if (!f)
+
+  if (!chat_key_load(key, sizeof(key)))
     {
+      syslog(LOG_ERR, "[dm-chat] runtime API key missing or invalid\n");
       return -1;
     }
-  fputs("#!/bin/sh\n", f);
-  fputs(line, f);
-  fputs("\n", f);
-  fclose(f);
-  rc = system("sh /tmp/dm_curl.sh");
-  return rc == 0 ? 0 : -1;
+
+  kf = fopen(MIMO_CURL_CONFIG, "w");
+  if (!kf || chmod(MIMO_CURL_CONFIG, S_IRUSR | S_IWUSR) != 0)
+    {
+      if (kf)
+        {
+          fclose(kf);
+        }
+      memset(key, 0, sizeof(key));
+      unlink(MIMO_CURL_CONFIG);
+      return -1;
+    }
+  key_write_ok = fprintf(kf, "header = \"Authorization: Bearer %s\"\n",
+                         key) > 0;
+  key_close_rc = fclose(kf);
+  memset(key, 0, sizeof(key));
+  if (!key_write_ok || key_close_rc != 0)
+    {
+      unlink(MIMO_CURL_CONFIG);
+      return -1;
+    }
+
+  sf = fopen(CHAT_CURL_SCRIPT, "w");
+  if (!sf)
+    {
+      unlink(MIMO_CURL_CONFIG);
+      syslog(LOG_ERR, "[dm-chat] cannot create curl script\n");
+      return -1;
+    }
+  script_write_ok = fputs("#!/bin/sh\n", sf) != EOF &&
+                    fputs(line, sf) != EOF && fputc('\n', sf) != EOF;
+  script_close_rc = fclose(sf);
+  if (!script_write_ok || script_close_rc != 0)
+    {
+      unlink(MIMO_CURL_CONFIG);
+      syslog(LOG_ERR, "[dm-chat] cannot write curl script\n");
+      return -1;
+    }
+
+  rc = system("sh " CHAT_CURL_SCRIPT);
+  unlink(MIMO_CURL_CONFIG);
+  if (rc != 0)
+    {
+      syslog(LOG_ERR, "[dm-chat] curl script failed status=%d\n", rc);
+      return -1;
+    }
+  return 0;
 }
 
 static char s_last_reply[CHAT_MAX_REPLY];
+static int s_last_request_remote_ok;
 static char s_persona_ctx[512];
 
 static const char *const s_local_lines[] = {
@@ -137,24 +236,119 @@ static int json_escape(const char *in, char *out, size_t cap)
   return (int)o;
 }
 
+/* ---- multi-turn conversation memory (shared with voice chat) ---- */
+#define HIST_TURN_MAX 3
+#define HIST_LINE     128
+
+static struct
+{
+  char user[HIST_LINE];
+  char bot[HIST_LINE];
+} s_hist[HIST_TURN_MAX];
+static int s_hist_n;
+
+void dm_chat_hist_reset(void)
+{
+  s_hist_n = 0;
+}
+
+void dm_chat_hist_push(const char *user, const char *assistant)
+{
+  int i;
+
+  if (!user || !user[0])
+    {
+      return;
+    }
+  if (s_hist_n == HIST_TURN_MAX)
+    {
+      for (i = 1; i < HIST_TURN_MAX; i++)
+        {
+          s_hist[i - 1] = s_hist[i];
+        }
+      s_hist_n = HIST_TURN_MAX - 1;
+    }
+  strncpy(s_hist[s_hist_n].user, user, HIST_LINE - 1);
+  s_hist[s_hist_n].user[HIST_LINE - 1] = '\0';
+  if (assistant)
+    {
+      strncpy(s_hist[s_hist_n].bot, assistant, HIST_LINE - 1);
+      s_hist[s_hist_n].bot[HIST_LINE - 1] = '\0';
+    }
+  else
+    {
+      s_hist[s_hist_n].bot[0] = '\0';
+    }
+  s_hist_n++;
+}
+
+/* emit {"role":..,"content":..}, entries (each with trailing comma) */
+int dm_chat_hist_json(char *out, int cap)
+{
+  char esc[HIST_LINE * 2];
+  int o = 0;
+  int i;
+
+  if (!out || cap < 2)
+    {
+      return -1;
+    }
+  out[0] = '\0';
+  for (i = 0; i < s_hist_n; i++)
+    {
+      int n;
+
+      if (s_hist[i].user[0])
+        {
+          json_escape(s_hist[i].user, esc, sizeof(esc));
+          n = snprintf(out + o, (size_t)(cap - o),
+                       "{\"role\":\"user\",\"content\":\"%s\"},", esc);
+          if (n < 0 || n >= cap - o)
+            {
+              out[o] = '\0';
+              return -1;
+            }
+          o += n;
+        }
+      if (s_hist[i].bot[0])
+        {
+          json_escape(s_hist[i].bot, esc, sizeof(esc));
+          n = snprintf(out + o, (size_t)(cap - o),
+                       "{\"role\":\"assistant\",\"content\":\"%s\"},", esc);
+          if (n < 0 || n >= cap - o)
+            {
+              out[o] = '\0';
+              return -1;
+            }
+          o += n;
+        }
+    }
+  return o;
+}
+
 static void extract_content(const char *path, char *out, size_t cap)
 {
   FILE *f;
   char *buf;
   long sz;
-  char *p;
-  char *q;
+  cJSON *root;
+  cJSON *choices;
+  cJSON *choice;
+  cJSON *message;
+  cJSON *content;
 
+  if (!out || cap < 2)
+    {
+      return;
+    }
   out[0] = '\0';
   f = fopen(path, "rb");
   if (!f)
     {
       return;
     }
-  fseek(f, 0, SEEK_END);
-  sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  if (sz <= 0 || sz > 64 * 1024)
+  if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) <= 0 ||
+      sz > 64 * 1024 || fseek(f, 0, SEEK_SET) != 0)
     {
       fclose(f);
       return;
@@ -174,67 +368,33 @@ static void extract_content(const char *path, char *out, size_t cap)
   buf[sz] = '\0';
   fclose(f);
 
-  p = strstr(buf, "\"content\"");
-  if (!p)
-    {
-      free(buf);
-      return;
-    }
-  p = strchr(p + 9, '"');
-  if (!p)
-    {
-      free(buf);
-      return;
-    }
-  q = strchr(p + 1, '"');
-  if (!q)
-    {
-      free(buf);
-      return;
-    }
-  {
-    size_t n = (size_t)(q - (p + 1));
-    if (n >= cap)
-      {
-        n = cap - 1;
-      }
-    memcpy(out, p + 1, n);
-    out[n] = '\0';
-    /* unescape \" and \\ and \n lightly */
-    {
-      char *r = out;
-      char *w = out;
-      while (*r)
-        {
-          if (r[0] == '\\' && r[1] == 'n')
-            {
-              *w++ = ' ';
-              r += 2;
-            }
-          else if (r[0] == '\\' && r[1] == '"')
-            {
-              *w++ = '"';
-              r += 2;
-            }
-          else if (r[0] == '\\' && r[1] == '\\')
-            {
-              *w++ = '\\';
-              r += 2;
-            }
-          else
-            {
-              *w++ = *r++;
-            }
-        }
-      *w = '\0';
-    }
-  }
+  root = cJSON_Parse(buf);
   free(buf);
+  if (!root)
+    {
+      return;
+    }
+  choices = cJSON_GetObjectItem(root, "choices");
+  choice = choices && cJSON_IsArray(choices)
+             ? cJSON_GetArrayItem(choices, 0) : NULL;
+  message = choice ? cJSON_GetObjectItem(choice, "message") : NULL;
+  content = message ? cJSON_GetObjectItem(message, "content") : NULL;
+  if (content && cJSON_IsString(content) && content->valuestring)
+    {
+      snprintf(out, cap, "%s", content->valuestring);
+    }
+  cJSON_Delete(root);
 }
 
 int dm_chat_ai_available(void)
 {
   return dm_wifi_connected() ? 1 : 0;
+}
+
+/* True only when the most recent chat answer came from the cloud API. */
+int dm_chat_ai_remote_ok(void)
+{
+  return s_last_request_remote_ok;
 }
 
 void dm_chat_ai_set_persona(const char *persona)
@@ -251,12 +411,16 @@ void dm_chat_ai_set_persona(const char *persona)
 const char *dm_chat_ai_ask(const char *user_text)
 {
   char esc[400];
-  char body[900];
+  char persona[1024];
+  char hist[1400];
+  char body[2400];
   char cmd[1200];
+  const char *persona_src;
   FILE *f;
   int n;
 
   s_last_reply[0] = '\0';
+  s_last_request_remote_ok = 0;
   if (!user_text || !user_text[0])
     {
       return local_reply("");
@@ -269,21 +433,36 @@ const char *dm_chat_ai_ask(const char *user_text)
       return s_last_reply;
     }
 
+  /* Do not send HTTPS while the board clock is still at its boot epoch;
+   * this causes mbedTLS to reject valid certificates as not-yet-valid. */
+  if (dm_wifi_wait_time_sync(40) != 0)
+    {
+      syslog(LOG_WARNING, "[dm-chat] system clock not synchronized\n");
+      strncpy(s_last_reply, local_reply(user_text), sizeof(s_last_reply) - 1);
+      s_last_reply[sizeof(s_last_reply) - 1] = '\0';
+      return s_last_reply;
+    }
+
   if (json_escape(user_text, esc, sizeof(esc)) < 0)
     {
       return local_reply(user_text);
     }
 
+  persona_src = s_persona_ctx[0] ? s_persona_ctx
+                                 : "你是openvela小助手，桌边陪伴助手，回答简洁温暖，不超过80字，用中文。";
+  if (json_escape(persona_src, persona, sizeof(persona)) < 0)
+    {
+      return local_reply(user_text);
+    }
+
+  dm_chat_hist_json(hist, sizeof(hist));
   n = snprintf(body, sizeof(body),
                "{\"model\":\"%s\",\"messages\":["
                "{\"role\":\"system\",\"content\":\"%s\"},"
+               "%s"
                "{\"role\":\"user\",\"content\":\"%s\"}],"
-               "\"temperature\":0.7,\"max_tokens\":200}",
-               MIMO_MODEL,
-               s_persona_ctx[0] ? s_persona_ctx
-                                 : "你是openvela小助手，桌边陪伴助手，回答简洁温暖，"
-                                   "不超过80字，用中文。",
-               esc);
+               "\"max_completion_tokens\":400,\"thinking\":{\"type\":\"disabled\"}}",
+               MIMO_MODEL, persona, hist, esc);
   if (n <= 0 || n >= (int)sizeof(body))
     {
       return local_reply(user_text);
@@ -298,12 +477,12 @@ const char *dm_chat_ai_ask(const char *user_text)
   fclose(f);
 
   unlink(CHAT_RSP_PATH);
+  /* Use the device-supported short options and reject HTTP error codes. */
   snprintf(cmd, sizeof(cmd),
-           "curl -sS --cacert /resource/etc/ssl/curl/ca-certificates.crt -m 20 -X POST %s/chat/completions "
-           "-H 'Authorization: Bearer %s' "
+           "curl -K " MIMO_CURL_CONFIG " -s -S -f -m 20 -X POST %s/chat/completions "
            "-H 'Content-Type: application/json' "
            "-d @%s -o %s",
-           MIMO_BASE, MIMO_KEY, CHAT_REQ_PATH, CHAT_RSP_PATH);
+           MIMO_BASE, CHAT_REQ_PATH, CHAT_RSP_PATH);
   if (run_curl_script(cmd) != 0)
     {
       strncpy(s_last_reply, local_reply(user_text),
@@ -313,7 +492,12 @@ const char *dm_chat_ai_ask(const char *user_text)
     }
 
   extract_content(CHAT_RSP_PATH, s_last_reply, sizeof(s_last_reply));
-  if (!s_last_reply[0])
+  if (s_last_reply[0])
+    {
+      s_last_request_remote_ok = 1;
+      dm_chat_hist_push(user_text, s_last_reply);
+    }
+  else
     {
       strncpy(s_last_reply, local_reply(user_text),
               sizeof(s_last_reply) - 1);
@@ -342,7 +526,7 @@ int dm_dict_ai_define(const char *word, char *out, int cap)
       return -1;
     }
   out[0] = '\0';
-  if (!dm_wifi_connected())
+  if (!dm_wifi_connected() || dm_wifi_wait_time_sync(40) != 0)
     {
       return -1;
     }
@@ -354,7 +538,7 @@ int dm_dict_ai_define(const char *word, char *out, int cap)
                "{\"model\":\"%s\",\"messages\":["
                "{\"role\":\"system\",\"content\":\"你是专业词典助手，用中文简洁解释单词，不超过100字。\"},"
                "{\"role\":\"user\",\"content\":\"解释单词 %s：词性、常见释义、一个例句。\"}],"
-               "\"temperature\":0.3,\"max_tokens\":180}",
+               "\"max_completion_tokens\":180,\"thinking\":{\"type\":\"disabled\"}}",
                MIMO_MODEL, esc);
   if (n <= 0 || n >= (int)sizeof(body))
     {
@@ -369,11 +553,10 @@ int dm_dict_ai_define(const char *word, char *out, int cap)
   fclose(f);
   unlink(CHAT_RSP_PATH);
   snprintf(cmd, sizeof(cmd),
-           "curl -sS --cacert /resource/etc/ssl/curl/ca-certificates.crt -m 18 -X POST %s/chat/completions "
-           "-H 'Authorization: Bearer %s' "
+           "curl -K " MIMO_CURL_CONFIG " -s -S -f -m 18 -X POST %s/chat/completions "
            "-H 'Content-Type: application/json' "
            "-d @%s -o %s",
-           MIMO_BASE, MIMO_KEY, CHAT_REQ_PATH, CHAT_RSP_PATH);
+           MIMO_BASE, CHAT_REQ_PATH, CHAT_RSP_PATH);
   if (run_curl_script(cmd) != 0)
     {
       return -1;

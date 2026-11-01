@@ -285,12 +285,13 @@ void dm_tick(void)
   dm_focus_run_tick();
   dm_wifi_tick();
   dm_proactive_tick();
-  dm_btnet_tick();
   dm_appconn_tick();
   dm_tools_tick();
   dm_life_tick();
   dm_fun_tick();
   dm_chat_tick();
+  dm_volume_tick();
+  dm_voice_sel_tick();
   dm_med_tick();
 }
 

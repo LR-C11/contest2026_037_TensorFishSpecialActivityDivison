@@ -21,6 +21,7 @@ typedef enum {
 
 int dm_ble_start(void);
 void dm_ble_stop(void);
+void dm_ble_poll(void);
 dm_ble_state_t dm_ble_state(void);
 bool dm_ble_is_paired(void);
 int dm_ble_paired_addr(char *buf, int buflen);

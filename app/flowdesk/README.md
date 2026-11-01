@@ -13,7 +13,8 @@
 ### 语音聊天
 - **点按录音**：点一下开始录，再点结束并发送
 - 链路：`/dev/audio/pcm0c` → ASR `mimo-v2.5-asr` → LLM `mimo-v2.6-flash` → TTS `mimo-v2.5-tts` → 喇叭
-- 云端：`https://token-plan-sgp.xiaomimimo.com/v1`
+- 云端：`https://token-plan-ams.xiaomimimo.com/v1/chat/completions`
+- ASR / LLM / TTS 都走 Chat Completions；TTS 使用 MiMo 预置音色，试听首用时在线生成并缓存到 `/data`。
 
 ### 词典（BandLingo 风格）
 - 本地词库约 6.5 万词（`word|definition`，a–z 分片，LRU 缓存）
@@ -99,6 +100,12 @@ pack
 lichee/out/r528s3/gemini-s1_nand/rtos_nuttx_r528s3-gemini-s1_uart0_128Mnand.img
 ```
 
+## 设备运行时配置
+
+- API 密钥仅从设备 `/data/deskmate_mimo.key` 读取（一行纯文本）；不要写入源码或提交到仓库，已暴露的密钥应先轮换。
+- HTTPS 仅在 NTP 已获取有效样本且系统时间可信后发送，TLS 证书校验保持开启。
+- 音色试听第一次需要云端合成；样本保存到 `/data`，之后可离线重播。
+
 ## 运行
 
 ```bash
@@ -108,7 +115,7 @@ flowdesk &
 
 日志：`FlowDesk 0.18.1 focus-home`
 
-## 配置
+## 构建配置
 
 `nsh_minidisplay/defconfig`：
 

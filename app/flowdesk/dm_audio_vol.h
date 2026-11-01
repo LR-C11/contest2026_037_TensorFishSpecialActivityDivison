@@ -9,7 +9,8 @@ int dm_vol_set(int percent);       /* 0..100, persists */
 int dm_vol_is_mute(void);
 int dm_vol_set_mute(int on);
 void dm_vol_apply(void);           /* push current vol to audio device */
-int dm_vol_test_beep(void);        /* short tone on speaker */
+int dm_vol_test_beep(void);        /* short offline fallback tone */
+int dm_vol_test_sample(void);      /* spoken settings sample */
 void dm_vol_init(void);
 
 #endif /* DM_AUDIO_VOL_H */

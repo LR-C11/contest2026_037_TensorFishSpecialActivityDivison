@@ -13,14 +13,101 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <pthread.h>
 
-#define VOICE_ROWS 8
+#define VOICE_ROWS 9
 
 static lv_obj_t *s_page;
 static lv_obj_t *s_rows[VOICE_ROWS];
 static lv_obj_t *s_row_sub[VOICE_ROWS];
 static lv_obj_t *s_cur_l;
 static lv_obj_t *s_tip_l;
+static volatile int s_preview_busy;
+static volatile int s_preview_done;
+static volatile int s_preview_ok;
+
+struct voice_preview_job_s
+{
+  int profile_idx;
+};
+
+static void *voice_preview_worker(void *arg)
+{
+  struct voice_preview_job_s *job = arg;
+  int profile_idx = job->profile_idx;
+
+  free(job);
+  s_preview_ok = (dm_voice_profile_preview(profile_idx) == 0);
+  s_preview_done = 1;
+  return NULL;
+}
+
+static void request_preview(int profile_idx)
+{
+  struct voice_preview_job_s *job;
+  pthread_t th;
+  pthread_attr_t attr;
+  int ret;
+
+  if (s_preview_busy)
+    {
+      return;
+    }
+
+  job = malloc(sizeof(*job));
+  if (!job)
+    {
+      if (s_tip_l)
+        {
+          lv_label_set_text(s_tip_l, dm_t("内存不足，无法试听",
+                                          "Not enough memory to preview"));
+        }
+      return;
+    }
+  job->profile_idx = profile_idx;
+  s_preview_busy = 1;
+  s_preview_done = 0;
+
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 24576);
+  ret = pthread_create(&th, &attr, voice_preview_worker, job);
+  pthread_attr_destroy(&attr);
+  if (ret == 0)
+    {
+      pthread_detach(th);
+    }
+  else
+    {
+      free(job);
+      s_preview_busy = 0;
+      if (s_tip_l)
+        {
+          lv_label_set_text(s_tip_l, dm_t("试听启动失败",
+                                          "Could not start preview"));
+        }
+    }
+}
+
+void dm_voice_sel_tick(void)
+{
+  if (!s_preview_done)
+    {
+      return;
+    }
+
+  s_preview_done = 0;
+  s_preview_busy = 0;
+  if (s_tip_l)
+    {
+      lv_label_set_text(s_tip_l,
+                        s_preview_ok
+                          ? dm_t("音色试听完成，样本已缓存",
+                                 "Voice preview cached in /data")
+                          : dm_t("试听失败：检查网络时间和API密钥",
+                                 "Preview failed: check time, network and API key"));
+    }
+}
 
 static void refresh_list(void)
 {
@@ -67,14 +154,8 @@ static void preview(lv_event_t *e)
     {
       lv_label_set_text(s_tip_l, dm_t("试听中…", "Playing…"));
     }
-  /* online TTS sample; offline beeps if no net */
-  (void)dm_voice_tts_play(dm_t("你好，我是你的播报助手。",
-                               "Hello, this is your voice assistant."));
-  if (s_tip_l)
-    {
-      lv_label_set_text(s_tip_l, dm_t("再点其他音色可切换",
-                                      "Tap another voice to switch"));
-    }
+  /* Generate the selected voice sample once, cache it in /data, then replay. */
+  request_preview(dm_voice_profile_sel());
 }
 
 static void pick(lv_event_t *e)
@@ -93,7 +174,7 @@ static void pick(lv_event_t *e)
                dm_voice_profile_name());
       lv_label_set_text(s_tip_l, msg);
     }
-  (void)dm_voice_tts_play(dm_t("已切换播报声音。", "Voice changed."));
+  request_preview(idx);
 }
 
 static void back(lv_event_t *e)
@@ -180,7 +261,8 @@ void dm_create_voice_sel(void)
       }
   }
 
-  s_tip_l = dm_lbl(s_page, "点选音色后自动保存", "Tap to select & save",
+  s_tip_l = dm_lbl(s_page, "首次联网生成，之后可离线试听",
+                   "Generate once online; replay offline",
                    g_dm_font_s, MD_ON_SURFACE_VARIANT);
   lv_obj_set_pos(s_tip_l, 12, 232);
 

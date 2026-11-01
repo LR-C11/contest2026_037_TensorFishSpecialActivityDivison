@@ -22,11 +22,13 @@
  *      ESSID verified (a wrong password no longer poisons boot auto-connect).
  *   6. Previous association/key is dropped before each attempt, and open APs
  *      explicitly clear any leftover WPA key (alg NONE).
- *   7. wapi command return codes are checked (psk/essid/save_config) and the
- *      password length (8..63) is validated in the UI.
+ *   7. wapi command return codes are checked (psk/essid); FlowDesk saves
+ *      verified credentials to its own /data files, avoiding a second
+ *      WAPI/NSH startup owner.
  *   8. Hardcoded fallback SSID/password removed from source.
- *   9. Manual-only: boot auto-connect is no longer invoked (deskmate_main.c);
- *      Settings > Wi-Fi drives scan/connect, like the 9.5 lvgldemo demo.
+ *   9. Boot and link-loss auto-connect use only verified credentials from
+ *      FlowDesk /data files or the existing WAPI JSON config; no SSID/PSK is
+ *      compiled into the application.
  *  10. Ported from 9.5 wifi_manager.c: the connect sequence retries up to
  *      DM_WIFI_CONN_ROUNDS with a 5s gap, and uses "wapi show" (AP all-zero)
  *      as an extra association check in addition to the IPv4 check.
@@ -42,11 +44,14 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
+#include <time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/ioctl.h>
 #include <wireless/wapi.h>
 #include <netutils/netlib.h>
+#include <netutils/ntpclient.h>
+#include <netutils/cJSON.h>
 #include <net/if.h>
 #include <syslog.h>
 
@@ -55,6 +60,9 @@
 #define DM_WIFI_STACK     65536
 #define DM_WIFI_CONN_ROUNDS    4   /* 9.5 wifi_manager retries forever; 4x5s is enough */
 #define DM_WIFI_CONN_RETRY_SEC 5
+#define DM_WIFI_NTP_SERVERS \
+  "ntp.aliyun.com;time2.cloud.tencent.com;time3.cloud.tencent.com"
+#define DM_WIFI_NTP_RETRY_SEC 30
 
 /* Fallback AP when no saved credentials exist.
  * Keep empty so personal WiFi credentials are NOT hardcoded in the repository.
@@ -63,11 +71,30 @@
 #define DM_WIFI_AUTO_SSID ""
 #define DM_WIFI_AUTO_PSK  ""
 #define DM_WIFI_SAVE_PATH "/data/deskmate_wifi.txt"
+#define DM_WIFI_WAPI_CONFIG_PATH "/data/etc/wifi/wapi.conf"
 
 static volatile int s_drv_ready;
 static volatile int s_auto_started;
 static volatile int s_manual_override;
 static volatile int s_conn_is_auto;
+static volatile int s_reconnect_running;
+static volatile int s_auto_thread_active;
+static uint64_t s_reconnect_retry_after_ms;
+static uint64_t s_ntp_retry_after_ms;
+static pthread_mutex_t s_ntp_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static uint64_t wifi_monotonic_ms(void)
+{
+  struct timespec ts;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    {
+      return 0;
+    }
+  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static void wifi_request_reconnect(void);
 
 typedef struct
 {
@@ -228,6 +255,107 @@ static int wifi_get_valid_ip(struct in_addr *addr)
   return 0;
 }
 
+static int wifi_clock_synced(void)
+{
+  struct ntpc_status_s status;
+  struct tm utc;
+  time_t now = time(NULL);
+
+  if (now <= 0 || gmtime_r(&now, &utc) == NULL || utc.tm_year + 1900 < 2024)
+    {
+      return 0;
+    }
+
+  if (ntpc_status(&status) != 0 || status.nsamples == 0)
+    {
+      return 0;
+    }
+
+  return 1;
+}
+
+static void wifi_restart_ntp_after_link(void)
+{
+  int stop_rc;
+  int start_rc;
+  uint64_t now_ms;
+
+  if (wifi_clock_synced())
+    {
+      return;
+    }
+
+  pthread_mutex_lock(&s_ntp_lock);
+  now_ms = wifi_monotonic_ms();
+  if (s_ntp_retry_after_ms != 0 && now_ms < s_ntp_retry_after_ms)
+    {
+      pthread_mutex_unlock(&s_ntp_lock);
+      return;
+    }
+
+  /* The stock pool may be unreachable from some WLANs. Refresh only from an
+   * app worker and provide several DNS-resolved public NTP endpoints. */
+  stop_rc = ntpc_stop();
+  start_rc = ntpc_start_with_list(DM_WIFI_NTP_SERVERS);
+  s_ntp_retry_after_ms = now_ms +
+      (uint64_t)DM_WIFI_NTP_RETRY_SEC * 1000;
+  syslog(start_rc < 0 ? LOG_WARNING : LOG_INFO,
+         "[deskmate-wifi] NTP refresh stop=%d start=%d\n",
+         stop_rc, start_rc);
+  pthread_mutex_unlock(&s_ntp_lock);
+}
+
+int dm_wifi_wait_time_sync(int timeout_sec)
+{
+  struct ntpc_status_s status;
+  struct tm utc;
+  time_t now;
+  int year = 0;
+  int status_rc;
+  int i;
+
+  if (timeout_sec < 0)
+    {
+      timeout_sec = 0;
+    }
+  if (timeout_sec > 90)
+    {
+      timeout_sec = 90;
+    }
+
+  for (i = 0; i <= timeout_sec; i++)
+    {
+      if (wifi_clock_synced())
+        {
+          return 0;
+        }
+      if (!dm_wifi_connected())
+        {
+          return -ENETDOWN;
+        }
+      if (i == 0 || (i > 0 && (i % DM_WIFI_NTP_RETRY_SEC) == 0))
+        {
+          wifi_restart_ntp_after_link();
+        }
+      if (i < timeout_sec)
+        {
+          sleep(1);
+        }
+    }
+
+  memset(&status, 0, sizeof(status));
+  status_rc = ntpc_status(&status);
+  now = time(NULL);
+  if (now > 0 && gmtime_r(&now, &utc) != NULL)
+    {
+      year = utc.tm_year + 1900;
+    }
+  syslog(LOG_WARNING,
+         "[deskmate-wifi] NTP not ready; status=%d samples=%u year=%d; HTTPS deferred\n",
+         status_rc, status.nsamples, year);
+  return -ETIMEDOUT;
+}
+
 /* Check wapi show wlan0 like 9.5 wifi_manager.c get_wifi_status() */
 static int wifi_is_associated(char *assoc_ssid, size_t ssid_len)
 {
@@ -346,6 +474,7 @@ int dm_wifi_set_enabled(int on)
       s_manual_override = 0;
       cli_sta_up();
       syslog(LOG_INFO, "[deskmate-wifi] enabled\n");
+      wifi_request_reconnect();
     }
   else
     {
@@ -381,13 +510,14 @@ static void wifi_mark_link_lost(void)
   pthread_mutex_unlock(&s_lock);
   s_link_lost = 1;
   syslog(LOG_WARNING, "[deskmate-wifi] link lost\n");
+  wifi_request_reconnect();
 }
 
 void dm_wifi_poll(void)
 {
   struct in_addr addr;
 
-  if (!s_wifi_enabled || !dm_wifi_connected())
+  if (!s_wifi_enabled)
     {
       return;
     }
@@ -395,6 +525,12 @@ void dm_wifi_poll(void)
   s_poll_ticks++;
   if ((s_poll_ticks & 7) != 0)
     {
+      return;
+    }
+
+  if (!dm_wifi_connected())
+    {
+      wifi_request_reconnect();
       return;
     }
 
@@ -494,38 +630,120 @@ static int wifi_cred_load_cfg(char *ssid, size_t slen, char *pass,
   return 0;
 }
 
+static int wifi_cred_load_wapi_json(char *ssid, size_t slen, char *pass,
+                                    size_t plen)
+{
+  FILE *f;
+  cJSON *root;
+  cJSON *ifobj;
+  cJSON *ssid_item;
+  cJSON *psk_item;
+  char *buf;
+  long size;
+  int ret = -1;
+
+  f = fopen(DM_WIFI_WAPI_CONFIG_PATH, "rb");
+  if (!f)
+    {
+      return -1;
+    }
+
+  if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) <= 0 || size > 4096 ||
+      fseek(f, 0, SEEK_SET) != 0)
+    {
+      fclose(f);
+      return -1;
+    }
+
+  buf = malloc((size_t)size + 1);
+  if (!buf)
+    {
+      fclose(f);
+      return -1;
+    }
+  if (fread(buf, 1, (size_t)size, f) != (size_t)size)
+    {
+      free(buf);
+      fclose(f);
+      return -1;
+    }
+  fclose(f);
+  buf[size] = '\0';
+
+  root = cJSON_Parse(buf);
+  free(buf);
+  if (!root)
+    {
+      return -1;
+    }
+
+  /* WAPI save_config writes {"wlan0":{"ssid":...,"psk":...}}.  Accept
+   * the older flat shape as a compatibility fallback. */
+  ifobj = cJSON_GetObjectItem(root, DM_WIFI_IF);
+  if (!ifobj)
+    {
+      ifobj = root;
+    }
+  ssid_item = cJSON_GetObjectItem(ifobj, "ssid");
+  psk_item = cJSON_GetObjectItem(ifobj, "psk");
+  if (ssid_item && cJSON_IsString(ssid_item) && ssid_item->valuestring &&
+      ssid_item->valuestring[0])
+    {
+      snprintf(ssid, slen, "%s", ssid_item->valuestring);
+      if (psk_item && cJSON_IsString(psk_item) && psk_item->valuestring)
+        {
+          snprintf(pass, plen, "%s", psk_item->valuestring);
+        }
+      else
+        {
+          pass[0] = '\0';
+        }
+      ret = 0;
+    }
+
+  cJSON_Delete(root);
+  if (ret == 0)
+    {
+      syslog(LOG_INFO, "[deskmate-wifi] loaded credentials from WAPI config\n");
+    }
+  return ret;
+}
+
 static int wifi_cred_load(char *ssid, size_t slen, char *pass, size_t plen)
 {
   FILE *f = fopen(DM_WIFI_SAVE_PATH, "r");
   char line[96];
 
-  if (!f)
+  if (f)
     {
-      return wifi_cred_load_cfg(ssid, slen, pass, plen);
-    }
-  if (!fgets(line, sizeof(line), f))
-    {
+      if (fgets(line, sizeof(line), f))
+        {
+          line[strcspn(line, "\r\n")] = 0;
+          if (line[0])
+            {
+              snprintf(ssid, slen, "%s", line);
+              if (fgets(line, sizeof(line), f))
+                {
+                  line[strcspn(line, "\r\n")] = 0;
+                  snprintf(pass, plen, "%s", line);
+                }
+              else
+                {
+                  pass[0] = '\0';
+                }
+              fclose(f);
+              return 0;
+            }
+        }
       fclose(f);
-      return wifi_cred_load_cfg(ssid, slen, pass, plen);
     }
-  line[strcspn(line, "\r\n")] = 0;
-  if (!line[0])
+
+  if (wifi_cred_load_cfg(ssid, slen, pass, plen) == 0)
     {
-      fclose(f);
-      return wifi_cred_load_cfg(ssid, slen, pass, plen);
+      return 0;
     }
-  snprintf(ssid, slen, "%s", line);
-  if (fgets(line, sizeof(line), f))
-    {
-      line[strcspn(line, "\r\n")] = 0;
-      snprintf(pass, plen, "%s", line);
-    }
-  else
-    {
-      pass[0] = 0;
-    }
-  fclose(f);
-  return 0;
+
+  return wifi_cred_load_wapi_json(ssid, slen, pass, plen);
 }
 
 static int ensure_driver_wait(int attempts_100ms)
@@ -929,7 +1147,8 @@ static void *conn_thread(void *arg)
           return NULL;
         }
       snprintf(cmd, sizeof(cmd), "wapi psk %s %s 3 2", DM_WIFI_IF, qpass);
-      syslog(LOG_INFO, "[deskmate-wifi] %s\n", cmd);
+      syslog(LOG_INFO,
+             "[deskmate-wifi] applying WPA2 credentials (redacted)\n");
       if (system(cmd) != 0)
         {
           syslog(LOG_ERR, "[deskmate-wifi] psk failed (passphrase must be 8-63 chars)\n");
@@ -1082,11 +1301,15 @@ static void *conn_thread(void *arg)
   syslog(LOG_INFO, "[deskmate-wifi] connected ssid=%s ip=%s\n",
          s_cur_ssid, s_cur_ip);
 
-  if (system("wapi save_config wlan0") != 0)
-    {
-      syslog(LOG_WARNING, "[deskmate-wifi] wapi save_config failed\n");
-    }
+  /* FlowDesk owns credential persistence; let NTP start only after WLAN
+   * has a verified association and an IPv4 address. */
   wifi_cred_save(try_ssid, try_pass);
+  s_manual_override = 0;
+  s_link_lost = 0;
+  if (!wifi_clock_synced())
+    {
+      wifi_restart_ntp_after_link();
+    }
 
   s_conn_busy = 0;
   s_conn_ok = 1;
@@ -1156,6 +1379,92 @@ int dm_wifi_connect(const char *ssid, const char *pass)
   return wifi_start_connect_internal(ssid, pass, 0);
 }
 
+static void *reconnect_thread(void *arg)
+{
+  char ssid[33];
+  char pass[64];
+  int attempt;
+  int i;
+
+  (void)arg;
+  ssid[0] = '\0';
+  pass[0] = '\0';
+  if (wifi_cred_load(ssid, sizeof(ssid), pass, sizeof(pass)) != 0 ||
+      !ssid[0])
+    {
+      syslog(LOG_WARNING, "[deskmate-wifi] reconnect skipped: no saved credentials\n");
+      goto done;
+    }
+
+  for (attempt = 0; attempt < 4 && s_wifi_enabled; attempt++)
+    {
+      if (dm_wifi_connected() || s_manual_override)
+        {
+          break;
+        }
+
+      if (attempt > 0)
+        {
+          sleep(DM_WIFI_CONN_RETRY_SEC);
+        }
+      if (s_scan_busy || s_conn_busy)
+        {
+          continue;
+        }
+
+      syslog(LOG_INFO, "[deskmate-wifi] saved-network reconnect attempt %d\n",
+             attempt + 1);
+      if (wifi_start_connect_internal(ssid, pass, 1) != 0)
+        {
+          continue;
+        }
+
+      for (i = 0; i < 600 && s_conn_busy && s_wifi_enabled &&
+                  !s_manual_override; i++)
+        {
+          usleep(100 * 1000);
+        }
+      if (dm_wifi_connected())
+        {
+          break;
+        }
+    }
+
+done:
+  s_reconnect_running = 0;
+  s_reconnect_retry_after_ms = wifi_monotonic_ms() + 30000;
+  return NULL;
+}
+
+static void wifi_request_reconnect(void)
+{
+  pthread_t th;
+  pthread_attr_t attr;
+
+  uint64_t now_ms = wifi_monotonic_ms();
+
+  if (!s_wifi_enabled || s_manual_override || dm_wifi_connected() ||
+      s_reconnect_running || s_auto_thread_active || s_scan_busy || s_conn_busy ||
+      (s_reconnect_retry_after_ms != 0 &&
+       now_ms < s_reconnect_retry_after_ms))
+    {
+      return;
+    }
+
+  s_reconnect_running = 1;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, DM_WIFI_STACK);
+  if (pthread_create(&th, &attr, reconnect_thread, NULL) == 0)
+    {
+      pthread_detach(th);
+    }
+  else
+    {
+      s_reconnect_running = 0;
+    }
+  pthread_attr_destroy(&attr);
+}
+
 /* Boot auto-connect: checks if already connected, otherwise tries saved
  * credentials once or twice and immediately yields if user opens manual scan. */
 static void *auto_thread(void *arg)
@@ -1176,8 +1485,8 @@ static void *auto_thread(void *arg)
       if (DM_WIFI_AUTO_SSID[0] == 0)
         {
           syslog(LOG_INFO,
-                 "[deskmate-wifi] no saved credentials; skip auto-connect\n");
-          return NULL;
+                 "[deskmate-wifi] no saved credentials; skip boot connect\n");
+          goto done;
         }
       snprintf(ssid, sizeof(ssid), "%s", DM_WIFI_AUTO_SSID);
       snprintf(pass, sizeof(pass), "%s", DM_WIFI_AUTO_PSK);
@@ -1192,30 +1501,34 @@ static void *auto_thread(void *arg)
         {
           if (s_manual_override)
             {
-              return NULL;
+              goto done;
             }
           sleep(2);
           continue;
         }
 
-      /* If board or wifi_manager already obtained an IP, adopt it directly */
-      if (wifi_get_valid_ip(&addr) == 0)
+      /* Ignore placeholder addresses unless association to the saved AP is
+       * verified; wlan0 may report 10.0.0.2 while its AP MAC is still zero. */
+      if (wifi_get_valid_ip(&addr) == 0 &&
+          wifi_verify_assoc(ssid) == 1 && wifi_is_link_up() == 1)
         {
-          char assoc_ssid[33];
-          wifi_is_associated(assoc_ssid, sizeof(assoc_ssid));
           pthread_mutex_lock(&s_lock);
-          snprintf(s_cur_ssid, sizeof(s_cur_ssid), "%s",
-                   assoc_ssid[0] ? assoc_ssid : ssid);
+          snprintf(s_cur_ssid, sizeof(s_cur_ssid), "%s", ssid);
           snprintf(s_cur_ip, sizeof(s_cur_ip), "%s", inet_ntoa(addr));
           pthread_mutex_unlock(&s_lock);
           syslog(LOG_INFO, "[deskmate-wifi] already connected ssid=%s ip=%s\n",
                  s_cur_ssid, s_cur_ip);
-          return NULL;
+          wifi_cred_save(ssid, pass);
+          if (!wifi_clock_synced())
+            {
+              wifi_restart_ntp_after_link();
+            }
+          goto done;
         }
 
       if (dm_wifi_connected() || s_manual_override)
         {
-          return NULL;
+          goto done;
         }
 
       dm_wifi_clear_conn_flags();
@@ -1226,7 +1539,7 @@ static void *auto_thread(void *arg)
         }
 
       /* Wait for conn_thread to finish or manual override */
-      for (i = 0; i < 180 && s_conn_busy && !s_manual_override; i++)
+      for (i = 0; i < 600 && s_conn_busy && !s_manual_override; i++)
         {
           usleep(100 * 1000);
         }
@@ -1236,25 +1549,27 @@ static void *auto_thread(void *arg)
           syslog(LOG_INFO, "[deskmate-wifi] auto connected ssid=%s ip=%s\n",
                  dm_wifi_cur_ssid(), dm_wifi_cur_ip());
           dm_wifi_clear_conn_flags();
-          return NULL;
+          goto done;
         }
 
       dm_wifi_clear_conn_flags();
       if (s_manual_override)
         {
-          return NULL;
+          goto done;
         }
       sleep(2);
     }
 
   syslog(LOG_INFO,
          "[deskmate-wifi] auto-connect finished; manual UI ready\n");
+done:
+  s_auto_thread_active = 0;
   return NULL;
 }
 
-/* DEPRECATED / DISABLED: boot auto-connect is no longer used.
- * The app is manual-only now (Settings > Wi-Fi). Kept for reference or for
- * a future opt-in, but dm_wifi_auto_start() is not called anywhere. */
+/* Boot auto-connect: reads saved credentials (/data/deskmate_wifi.txt or
+ * /data/wifi.cfg) and reconnects, yielding to the manual UI if the user
+ * starts a scan/connect first.  Called once from deskmate_main.c. */
 void dm_wifi_auto_start(void)
 {
   pthread_t th;
@@ -1265,12 +1580,17 @@ void dm_wifi_auto_start(void)
       return;
     }
   s_auto_started = 1;
+  s_auto_thread_active = 1;
 
   pthread_attr_init(&attr);
   pthread_attr_setstacksize(&attr, DM_WIFI_STACK);
   if (pthread_create(&th, &attr, auto_thread, NULL) == 0)
     {
       pthread_detach(th);
+    }
+  else
+    {
+      s_auto_thread_active = 0;
     }
   pthread_attr_destroy(&attr);
 }

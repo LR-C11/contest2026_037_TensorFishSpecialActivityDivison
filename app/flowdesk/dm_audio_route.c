@@ -24,7 +24,7 @@ void dm_out_init(void)
     {
       if (fscanf(f, "%d", &v) == 1)
         {
-          if (v >= 0 && v <= 2)
+          if (v >= 0 && v <= 1)
             {
               s_ch = v;
             }
@@ -45,9 +45,9 @@ void dm_out_set(int ch)
     {
       ch = 0;
     }
-  if (ch > 2)
+  if (ch > 1)
     {
-      ch = 2;
+      ch = 1;
     }
   s_ch = ch;
   f = fopen(OUT_CFG, "w");
@@ -64,24 +64,9 @@ const char *dm_out_name(int ch)
     {
     case DM_OUT_SPEAKER:
       return "扬声器";
-    case DM_OUT_HEADSET:
-      return "蓝牙耳机";
     default:
       return "自动";
     }
-}
-
-int dm_out_headset_present(void)
-{
-  /* A2DP source connected? probe via bttool state is heavy;
-     treat non-idle BT connect as present via /tmp flag set by headset page. */
-  FILE *f = fopen("/tmp/hs_connected.flag", "r");
-  if (f)
-    {
-      fclose(f);
-      return 1;
-    }
-  return 0;
 }
 
 #endif /* CONFIG_DESKMATE_APP */
