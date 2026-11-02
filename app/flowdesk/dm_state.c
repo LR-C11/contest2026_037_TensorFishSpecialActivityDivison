@@ -289,6 +289,7 @@ void dm_tick(void)
   dm_tools_tick();
   dm_life_tick();
   dm_fun_tick();
+  dm_assistant_intent_tick();
   dm_chat_tick();
   dm_volume_tick();
   dm_voice_sel_tick();

@@ -793,6 +793,92 @@ int dm_health_score_detail(char *buf, int cap)
   return v;
 }
 
+void dm_health_voice_advice(const char *user_text, char *out, int cap)
+{
+  const char *recent = NULL;
+  int score;
+  int water;
+  int sched = 0;
+  int taken = 0;
+  int focus;
+  int i;
+  int is_down;
+  int has_data;
+
+  if (!out || cap < 8)
+    {
+      return;
+    }
+  health_rollover_if_new_day();
+  score = dm_health_score();
+  has_data = s_last_has_mood || s_last_has_beh;
+  water = dm_water_today_cups();
+  focus = g_dm.focus_done_min;
+  (void)dm_med_today_stats(&sched, &taken);
+  is_down = user_text &&
+            (strstr(user_text, "不开心") || strstr(user_text, "心情不好") ||
+             strstr(user_text, "难过") || strstr(user_text, "伤心") ||
+             strstr(user_text, "焦虑") || strstr(user_text, "压力大") ||
+             strstr(user_text, "很累") || strstr(user_text, "疲惫") ||
+             strstr(user_text, "孤独") || strstr(user_text, "烦躁") ||
+             strstr(user_text, "沮丧"));
+
+  if (s_rec_n > 0)
+    {
+      const dm_mood_rec_t *rec = &s_recs[0];
+      for (i = 0; i < (int)(sizeof(s_moods) / sizeof(s_moods[0])); i++)
+        {
+          if (rec->mood_mask & s_moods[i].bit)
+            {
+              recent = s_moods[i].zh;
+              break;
+            }
+        }
+      if (!recent && rec->quick > 0 && rec->quick <= DM_QUICK_MAX)
+        {
+          recent = s_quick_zh[rec->quick - 1];
+        }
+    }
+
+  if (is_down)
+    {
+      if (has_data && recent)
+        {
+          snprintf(out, (size_t)cap,
+                   "参考健康页：综合分%d，最近心情“%s”，专注%d分钟、喝水%d杯。先慢慢呼吸、喝水或休息；若持续影响生活，找信任的人或专业人士聊聊。",
+                   score, recent, focus, water);
+        }
+      else if (has_data)
+        {
+          snprintf(out, (size_t)cap,
+                   "参考健康页：综合分%d，专注%d分钟、喝水%d杯。先慢呼吸、休息；若持续影响生活，找信任的人或专业人士聊聊。",
+                   score, focus, water);
+        }
+      else
+        {
+          snprintf(out, (size_t)cap,
+                   "听起来你现在不太好受。我还没看到今日健康记录。先慢呼吸、喝水或休息；若持续影响生活，找信任的人或专业人士聊聊。");
+        }
+    }
+  else if (has_data)
+    {
+      snprintf(out, (size_t)cap,
+               "根据健康页今日记录：综合分%d，专注%d分钟、喝水%d杯。可以先做一件轻松的小事，再看看状态。",
+               score, focus, water);
+    }
+  else
+    {
+      snprintf(out, (size_t)cap,
+               "我还没看到今天的健康记录。可以先做几次慢呼吸、喝点水，或者记录一下此刻的心情。");
+    }
+  if (sched > 0 && taken < sched && strlen(out) + 64 < (size_t)cap)
+    {
+      size_t used = strlen(out);
+      snprintf(out + used, (size_t)cap - used,
+               "另外，健康页显示今天有%d项用药记录尚未打卡。", sched - taken);
+    }
+}
+
 static uint32_t score_color(int v)
 {
   if (v >= 70)

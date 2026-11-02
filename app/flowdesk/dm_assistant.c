@@ -1,0 +1,1169 @@
+/* Local voice/text intent routing for FlowDesk. */
+
+#include "deskmate.h"
+#include "dm_voice.h"
+
+#ifdef CONFIG_DESKMATE_APP
+
+#include <ctype.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#define INTENT_TEXT_MAX 256
+#define INTENT_REPLY_MAX 240
+#define INTENT_WAIT_STEPS 160
+#define INTENT_WAIT_US 50000
+
+typedef enum
+{
+  INTENT_NONE = 0,
+  INTENT_FOCUS,
+  INTENT_COUNTDOWN,
+  INTENT_NOTE,
+  INTENT_MOOD,
+  INTENT_WAKE,
+  INTENT_GAME_ASK,
+  INTENT_GAME,
+  INTENT_GAME_CANCEL,
+  INTENT_TIME_ERROR
+} assistant_intent_type_t;
+
+typedef struct
+{
+  assistant_intent_type_t type;
+  int seconds;
+  dm_page_t game_page;
+  int year;
+  int month;
+  int day;
+  int hour;
+  int minute;
+  char text[INTENT_TEXT_MAX];
+} assistant_intent_t;
+
+static pthread_mutex_t s_intent_lock = PTHREAD_MUTEX_INITIALIZER;
+static assistant_intent_t s_intent;
+static int s_intent_active;
+static int s_intent_executing;
+static int s_intent_done;
+static int s_waiting_game_choice;
+static char s_intent_reply[INTENT_REPLY_MAX];
+
+static int contains_any(const char *text, const char *const *words, size_t count)
+{
+  size_t i;
+  for (i = 0; i < count; i++)
+    {
+      if (strstr(text, words[i]))
+        {
+          return 1;
+        }
+    }
+  return 0;
+}
+
+static int chinese_digit(const char *p, size_t left, int *value)
+{
+  static const struct
+  {
+    const char *text;
+    int value;
+  } digits[] = {
+    {"零", 0}, {"〇", 0}, {"一", 1}, {"二", 2}, {"两", 2},
+    {"三", 3}, {"四", 4}, {"五", 5}, {"六", 6}, {"七", 7},
+    {"八", 8}, {"九", 9}
+  };
+  size_t i;
+
+  if (left < 3)
+    {
+      return 0;
+    }
+  for (i = 0; i < sizeof(digits) / sizeof(digits[0]); i++)
+    {
+      if (memcmp(p, digits[i].text, 3) == 0)
+        {
+          *value = digits[i].value;
+          return 1;
+        }
+    }
+  return 0;
+}
+
+static int chinese_unit(const char *p, size_t left, int *unit)
+{
+  if (left < 3)
+    {
+      return 0;
+    }
+  if (memcmp(p, "十", 3) == 0)
+    {
+      *unit = 10;
+      return 1;
+    }
+  if (memcmp(p, "百", 3) == 0)
+    {
+      *unit = 100;
+      return 1;
+    }
+  if (memcmp(p, "千", 3) == 0)
+    {
+      *unit = 1000;
+      return 1;
+    }
+  return 0;
+}
+
+static int parse_number_slice(const char *text, size_t begin, size_t end,
+                              int *value)
+{
+  size_t i;
+  int ascii_only = 1;
+  int total = 0;
+  int section = 0;
+  int number = -1;
+  int saw = 0;
+
+  if (!text || !value || begin >= end)
+    {
+      return 0;
+    }
+  for (i = begin; i < end; i++)
+    {
+      if (!isdigit((unsigned char)text[i]))
+        {
+          ascii_only = 0;
+          break;
+        }
+    }
+  if (ascii_only)
+    {
+      long parsed = 0;
+      for (i = begin; i < end; i++)
+        {
+          int digit = text[i] - '0';
+          if (parsed > (10000 - digit) / 10)
+            {
+              return 0;
+            }
+          parsed = parsed * 10 + digit;
+        }
+      *value = (int)parsed;
+      return 1;
+    }
+
+  i = begin;
+  while (i < end)
+    {
+      int digit;
+      int unit;
+      if (chinese_digit(text + i, end - i, &digit))
+        {
+          number = digit;
+          i += 3;
+          saw = 1;
+        }
+      else if (chinese_unit(text + i, end - i, &unit))
+        {
+          int multiplier = number >= 0 ? number : 1;
+          section += multiplier * unit;
+          number = -1;
+          i += 3;
+          saw = 1;
+        }
+      else
+        {
+          return 0;
+        }
+    }
+  if (!saw)
+    {
+      return 0;
+    }
+  if (number >= 0)
+    {
+      section += number;
+    }
+  total += section;
+  if (total > 10000)
+    {
+      return 0;
+    }
+  *value = total;
+  return 1;
+}
+
+static int parse_number_before(const char *text, size_t end, size_t *start,
+                               int *value)
+{
+  size_t begin;
+  size_t number_end = end;
+
+  while (number_end > 0 &&
+         (text[number_end - 1] == ' ' || text[number_end - 1] == '\t' ||
+          text[number_end - 1] == '\r' || text[number_end - 1] == '\n'))
+    {
+      number_end--;
+    }
+  begin = number_end;
+  while (begin > 0)
+    {
+      int ignored;
+      if (isdigit((unsigned char)text[begin - 1]))
+        {
+          begin--;
+          continue;
+        }
+      if (begin >= 3 &&
+          (chinese_digit(text + begin - 3, 3, &ignored) ||
+           chinese_unit(text + begin - 3, 3, &ignored)))
+        {
+          begin -= 3;
+          continue;
+        }
+      break;
+    }
+  if (!parse_number_slice(text, begin, number_end, value))
+    {
+      return 0;
+    }
+  if (start)
+    {
+      *start = begin;
+    }
+  return 1;
+}
+
+static const char *first_of(const char *text, const char *a, const char *b)
+{
+  const char *pa = a ? strstr(text, a) : NULL;
+  const char *pb = b ? strstr(text, b) : NULL;
+  if (!pa)
+    {
+      return pb;
+    }
+  if (!pb)
+    {
+      return pa;
+    }
+  return pa < pb ? pa : pb;
+}
+
+static int parse_duration_part(const char *text, const char *unit,
+                               int unit_bytes, int multiplier,
+                               int allow_half_hour, int *seconds)
+{
+  size_t start;
+  int number;
+
+  if (!unit)
+    {
+      return 0;
+    }
+  if (allow_half_hour && unit_bytes == 6 && unit >= text + 3 &&
+      memcmp(unit - 3, "半", 3) == 0)
+    {
+      if (unit >= text + 6 && memcmp(unit - 6, "个", 3) == 0 &&
+          parse_number_before(text, (size_t)(unit - text - 6), &start,
+                              &number))
+        {
+          if (number < 0 || number > 2)
+            {
+              return -1;
+            }
+          *seconds += number * multiplier + 30 * 60;
+        }
+      else
+        {
+          *seconds += 30 * 60;
+        }
+      return 1;
+    }
+  if (!parse_number_before(text, (size_t)(unit - text), &start, &number))
+    {
+      /* Accept the natural Mandarin form "一个小时". */
+      if (allow_half_hour && unit_bytes == 6 && unit >= text + 3 &&
+          memcmp(unit - 3, "个", 3) == 0 &&
+          parse_number_before(text, (size_t)(unit - text - 3), &start,
+                              &number))
+        {
+          /* parsed the number before 个 */
+        }
+      else
+        {
+          return -1;
+        }
+    }
+  if (number < 0 || number > 10000 ||
+      number > 7200 / multiplier)
+    {
+      return -1;
+    }
+  *seconds += number * multiplier;
+  return 1;
+}
+
+static int parse_duration_seconds(const char *text, int *seconds)
+{
+  const char *hour_word = strstr(text, "小时");
+  const char *minute_word = strstr(text, "分钟");
+  const char *second_word = strstr(text, "秒");
+  int total = 0;
+  int parts = 0;
+  int rc;
+
+  if (!minute_word)
+    {
+      minute_word = strstr(text, "分");
+    }
+  rc = parse_duration_part(text, hour_word, 6, 60 * 60, 1, &total);
+  if (rc < 0)
+    {
+      return 0;
+    }
+  parts += rc;
+
+  /* "半小时" is consumed as an hour component above; support an additional
+   * half hour in forms such as "1小时半" as well. */
+  if (!hour_word && strstr(text, "半小时"))
+    {
+      total += 30 * 60;
+      parts++;
+    }
+  else if (hour_word && strstr(hour_word + 6, "半") &&
+           (!minute_word || strstr(hour_word + 6, "半") < minute_word))
+    {
+      total += 30 * 60;
+    }
+
+  rc = parse_duration_part(text, minute_word,
+                           minute_word && strstr(text, "分钟") == minute_word
+                             ? 6 : 3,
+                           60, 0, &total);
+  if (rc < 0)
+    {
+      return 0;
+    }
+  parts += rc;
+
+  rc = parse_duration_part(text, second_word, 3, 1, 0, &total);
+  if (rc < 0)
+    {
+      return 0;
+    }
+  parts += rc;
+
+  if (parts == 0 || total < 1 || total > 120 * 60)
+    {
+      return 0;
+    }
+  *seconds = total;
+  return 1;
+}
+
+static int ascii_contains_ci(const char *text, const char *needle)
+{
+  size_t n;
+  const char *p;
+
+  if (!text || !needle || !needle[0])
+    {
+      return 0;
+    }
+  n = strlen(needle);
+  for (p = text; *p; p++)
+    {
+      size_t i;
+      for (i = 0; i < n; i++)
+        {
+          unsigned char a = (unsigned char)p[i];
+          unsigned char b = (unsigned char)needle[i];
+          if (!a || tolower(a) != tolower(b))
+            {
+              break;
+            }
+        }
+      if (i == n)
+        {
+          return 1;
+        }
+    }
+  return 0;
+}
+
+static int is_wake_phrase(const char *text)
+{
+  int mentions_openvela = ascii_contains_ci(text, "openvela");
+  if (!mentions_openvela)
+    {
+      return 0;
+    }
+  return strstr(text, "你好") != NULL ||
+         (ascii_contains_ci(text, "hello") && mentions_openvela);
+}
+
+static dm_page_t game_page_from_text(const char *text)
+{
+  if (strstr(text, "2048") || strstr(text, "二零四八") ||
+      strstr(text, "两千零四十八"))
+    {
+      return PAGE_2048;
+    }
+  if (strstr(text, "猜数字") || strstr(text, "猜个数") ||
+      strstr(text, "猜数"))
+    {
+      return PAGE_GUESS;
+    }
+  if (strstr(text, "24点") || strstr(text, "24 点") ||
+      strstr(text, "二十四点"))
+    {
+      return PAGE_24;
+    }
+  return PAGE_COUNT;
+}
+
+static int is_game_request(const char *text)
+{
+  static const char *const triggers[] = {
+    "小游戏", "玩游戏", "玩个游戏", "玩一局", "玩一下游戏", "一起玩",
+    "想玩", "来一局"
+  };
+  return contains_any(text, triggers, sizeof(triggers) / sizeof(triggers[0]));
+}
+
+static int parse_datetime(const char *text, int *year, int *month, int *day,
+                          int *hour, int *minute, size_t *date_start,
+                          size_t *date_end, size_t *time_start,
+                          size_t *time_end)
+{
+  const char *day_mark = first_of(text, "号", "日");
+  const char *month_mark = strstr(text, "月");
+  const char *time_mark;
+  const char *minute_mark;
+  const char *year_mark;
+  size_t year_start = 0;
+  size_t day_start;
+  size_t hour_start;
+  size_t month_start = 0;
+  int explicit_month = 0;
+  int explicit_year = 0;
+  int month_value = 0;
+  int year_value = 0;
+  int day_value;
+  int hour_value;
+  int minute_value = 0;
+  time_t now;
+  struct tm current;
+  struct tm target_tm;
+  time_t target;
+  struct tm verify;
+  int attempt;
+  int resolved = 0;
+
+  if (!day_mark || !parse_number_before(text, (size_t)(day_mark - text),
+                                        &day_start, &day_value) ||
+      day_value < 1 || day_value > 31)
+    {
+      return 0;
+    }
+  if (month_mark && month_mark < day_mark &&
+      parse_number_before(text, (size_t)(month_mark - text), &month_start,
+                          &month_value) && month_value >= 1 &&
+      month_value <= 12)
+    {
+      explicit_month = 1;
+    }
+  else
+    {
+      month_mark = NULL;
+    }
+
+  year_mark = month_mark ? strstr(text, "年") : NULL;
+  if (year_mark && year_mark < month_mark &&
+      parse_number_before(text, (size_t)(year_mark - text), &year_start,
+                          &year_value) && year_value >= 2024 &&
+      year_value <= 2099)
+    {
+      explicit_year = 1;
+    }
+  time_mark = first_of(day_mark + 3, "点", "时");
+  if (!time_mark ||
+      !parse_number_before(text, (size_t)(time_mark - text), &hour_start,
+                           &hour_value) || hour_value < 0 || hour_value > 23)
+    {
+      return 0;
+    }
+
+  minute_value = 0;
+  minute_mark = strstr(time_mark + 3, "分");
+  if (minute_mark)
+    {
+      size_t minute_start;
+      int parsed_minute;
+      if (parse_number_before(text, (size_t)(minute_mark - text),
+                              &minute_start, &parsed_minute) &&
+          minute_start >= (size_t)(time_mark + 3 - text) &&
+          parsed_minute >= 0 && parsed_minute <= 59)
+        {
+          minute_value = parsed_minute;
+        }
+      else
+        {
+          minute_mark = NULL;
+        }
+    }
+  else if (strncmp(time_mark + 3, "半", 3) == 0)
+    {
+      minute_value = 30;
+    }
+
+  now = time(NULL);
+  localtime_r(&now, &current);
+  if (current.tm_year + 1900 < 2024)
+    {
+      return -1;
+    }
+  *year = explicit_year ? year_value : current.tm_year + 1900;
+  *month = explicit_month ? month_value : current.tm_mon + 1;
+  *day = day_value;
+  *hour = hour_value;
+  *minute = minute_value;
+
+  /* For an omitted month, roll forward to the next valid occurrence. This
+   * also handles dates such as the 31st when the current month is shorter. */
+  for (attempt = 0; attempt < (explicit_year ? 1 : 12); attempt++)
+    {
+      memset(&target_tm, 0, sizeof(target_tm));
+      target_tm.tm_year = *year - 1900;
+      target_tm.tm_mon = *month - 1;
+      target_tm.tm_mday = *day;
+      target_tm.tm_hour = *hour;
+      target_tm.tm_min = *minute;
+      target_tm.tm_isdst = -1;
+      target = mktime(&target_tm);
+      if (target != (time_t)-1)
+        {
+          localtime_r(&target, &verify);
+          if (verify.tm_year == *year - 1900 &&
+              verify.tm_mon == *month - 1 && verify.tm_mday == *day &&
+              verify.tm_hour == *hour && verify.tm_min == *minute &&
+              (explicit_year || target > now))
+            {
+              resolved = 1;
+              break;
+            }
+        }
+
+      if (explicit_year)
+        {
+          break;
+        }
+      if (explicit_month)
+        {
+          (*year)++;
+        }
+      else
+        {
+          (*month)++;
+          if (*month > 12)
+            {
+              *month = 1;
+              (*year)++;
+            }
+        }
+    }
+  if (!resolved)
+    {
+      return 0;
+    }
+
+  if (date_start)
+    {
+      *date_start = explicit_year ? year_start
+                                  : (explicit_month ? month_start : day_start);
+    }
+  if (date_end)
+    {
+      *date_end = (size_t)(day_mark - text) + 3;
+    }
+  if (time_start)
+    {
+      *time_start = hour_start;
+    }
+  if (time_end)
+    {
+      *time_end = (minute_mark ? (size_t)(minute_mark - text) + 3
+                               : (size_t)(time_mark - text) + 3 +
+                                 (minute_value == 30 ? 3 : 0));
+    }
+  return 1;
+}
+
+static void trim_reminder_punctuation(char *text, size_t *len)
+{
+  int changed = 1;
+  while (*len > 0 && changed)
+    {
+      changed = 0;
+      if (text[*len - 1] == ' ' || text[*len - 1] == '\t' ||
+          text[*len - 1] == ',' || text[*len - 1] == ':' ||
+          text[*len - 1] == '-' || text[*len - 1] == '.')
+        {
+          text[--(*len)] = '\0';
+          changed = 1;
+        }
+      else if (*len >= 3 &&
+               (memcmp(text + *len - 3, "。", 3) == 0 ||
+                memcmp(text + *len - 3, "，", 3) == 0 ||
+                memcmp(text + *len - 3, "！", 3) == 0 ||
+                memcmp(text + *len - 3, "？", 3) == 0 ||
+                memcmp(text + *len - 3, "；", 3) == 0 ||
+                memcmp(text + *len - 3, "：", 3) == 0))
+        {
+          *len -= 3;
+          text[*len] = '\0';
+          changed = 1;
+        }
+    }
+}
+
+static void trim_reminder_clutter(char *text, size_t *len)
+{
+  static const char *const suffixes[] = {
+    "提醒我", "提醒一下", "帮我提醒", "到时候", "请", "在"
+  };
+  size_t i;
+  int changed = 1;
+
+  while (*len > 0 && changed)
+    {
+      changed = 0;
+      for (i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++)
+        {
+          size_t n = strlen(suffixes[i]);
+          if (*len >= n && memcmp(text + *len - n, suffixes[i], n) == 0)
+            {
+              *len -= n;
+              text[*len] = '\0';
+              trim_reminder_punctuation(text, len);
+              changed = 1;
+              break;
+            }
+        }
+    }
+}
+
+static void clean_reminder_name(const char *text, size_t date_start,
+                                size_t date_end, size_t time_start,
+                                size_t time_end, char *out, size_t cap)
+{
+  char tmp[INTENT_TEXT_MAX];
+  size_t len = strlen(text);
+  size_t start = date_start;
+  size_t end = date_end;
+  size_t tstart = time_start;
+  size_t tend = time_end;
+  size_t out_len = 0;
+  static const char *const leading[] = {
+    "帮我设置提醒", "帮我", "给我", "提醒一下", "提醒我", "我提醒我", "倒数日",
+    "记一个", "计一个", "记一下", "记下来", "在", "请", "把", "到时候"
+  };
+  size_t i;
+
+  if (len >= sizeof(tmp))
+    {
+      snprintf(out, cap, "%s", "提醒事项");
+      return;
+    }
+  memcpy(tmp, text, len);
+  tmp[len] = '\0';
+
+  if (tstart >= end)
+    {
+      memmove(tmp + tstart, tmp + tend, len - tend + 1);
+      len -= tend - tstart;
+      memmove(tmp + start, tmp + end, len - end + 1);
+      len -= end - start;
+    }
+  else if (start >= tend)
+    {
+      memmove(tmp + start, tmp + end, len - end + 1);
+      len -= end - start;
+      memmove(tmp + tstart, tmp + tend, len - tend + 1);
+      len -= tend - tstart;
+    }
+  else
+    {
+      memmove(tmp + start, tmp + end, len - end + 1);
+      len -= end - start;
+      if (tstart > end)
+        {
+          tstart -= end - start;
+          tend -= end - start;
+        }
+      memmove(tmp + tstart, tmp + tend, len - tend + 1);
+      len -= tend - tstart;
+    }
+
+  while (len > 0)
+    {
+      int changed = 0;
+      while (len > 0 && (tmp[0] == ' ' || tmp[0] == '\t' || tmp[0] == ',' ||
+                         tmp[0] == ':' || tmp[0] == '-'))
+        {
+          memmove(tmp, tmp + 1, len);
+          len--;
+        }
+      while (len >= 3 &&
+             (memcmp(tmp, "，", 3) == 0 || memcmp(tmp, "：", 3) == 0 ||
+              memcmp(tmp, "、", 3) == 0))
+        {
+          memmove(tmp, tmp + 3, len - 2);
+          len -= 3;
+        }
+      for (i = 0; i < sizeof(leading) / sizeof(leading[0]); i++)
+        {
+          size_t n = strlen(leading[i]);
+          if (len >= n && memcmp(tmp, leading[i], n) == 0)
+            {
+              memmove(tmp, tmp + n, len - n + 1);
+              len -= n;
+              changed = 1;
+              break;
+            }
+        }
+      if (!changed)
+        {
+          break;
+        }
+    }
+  trim_reminder_clutter(tmp, &len);
+  trim_reminder_punctuation(tmp, &len);
+
+  if (len == 0)
+    {
+      snprintf(out, cap, "%s", "提醒事项");
+      return;
+    }
+  out_len = len < cap - 1 ? len : cap - 1;
+  if (out_len < len)
+    {
+      while (out_len > 0 && ((unsigned char)tmp[out_len] & 0xc0u) == 0x80u)
+        {
+          out_len--;
+        }
+    }
+  memcpy(out, tmp, out_len);
+  out[out_len] = '\0';
+}
+
+static int parse_intent(const char *text, assistant_intent_t *intent)
+{
+  static const char *const note_triggers[] = {
+    "帮我记一下", "帮我记下", "记一下", "记下来", "记下", "记一个",
+    "记个", "备忘里"
+  };
+  static const char *const reminder_triggers[] = {
+    "提醒", "闹钟", "倒数日", "记一下", "记一个", "计一个", "安排",
+    "设置提醒", "设个提醒"
+  };
+  static const char *const mood_words[] = {
+    "不开心", "不高兴", "心情不好", "心情差", "情绪低落", "难受",
+    "难过", "伤心", "焦虑", "压力大", "很累", "疲惫", "孤独",
+    "烦躁", "沮丧"
+  };
+  static const char *const no_reminder[] = {
+    "不要提醒", "别提醒", "不用提醒", "取消提醒", "不要闹钟", "取消闹钟"
+  };
+  static const char *const no_focus[] = {
+    "不要专注", "别专注", "不用专注", "取消专注", "不要计时", "别计时"
+  };
+  size_t date_start = 0;
+  size_t date_end = 0;
+  size_t time_start = 0;
+  size_t time_end = 0;
+  int has_dt;
+  int seconds;
+  dm_page_t game_page;
+  int cancel_reminder;
+  int cancel_focus;
+
+  memset(intent, 0, sizeof(*intent));
+  cancel_reminder = contains_any(
+      text, no_reminder, sizeof(no_reminder) / sizeof(no_reminder[0]));
+  cancel_focus = contains_any(text, no_focus,
+                              sizeof(no_focus) / sizeof(no_focus[0]));
+
+  has_dt = parse_datetime(text, &intent->year, &intent->month, &intent->day,
+                          &intent->hour, &intent->minute, &date_start,
+                          &date_end, &time_start, &time_end);
+  if (has_dt < 0 && !cancel_reminder &&
+      contains_any(text, reminder_triggers,
+                   sizeof(reminder_triggers) / sizeof(reminder_triggers[0])))
+    {
+      intent->type = INTENT_TIME_ERROR;
+      return 1;
+    }
+  if (has_dt == 1 && !cancel_reminder &&
+      contains_any(text, reminder_triggers,
+                   sizeof(reminder_triggers) / sizeof(reminder_triggers[0])))
+    {
+      intent->type = INTENT_COUNTDOWN;
+      clean_reminder_name(text, date_start, date_end, time_start, time_end,
+                          intent->text, sizeof(intent->text));
+      return 1;
+    }
+
+  game_page = game_page_from_text(text);
+  if (game_page != PAGE_COUNT &&
+      (is_game_request(text) || strstr(text, "玩") != NULL))
+    {
+      intent->type = INTENT_GAME;
+      intent->game_page = game_page;
+      return 1;
+    }
+  if (is_game_request(text))
+    {
+      intent->type = INTENT_GAME_ASK;
+      return 1;
+    }
+  if (is_wake_phrase(text))
+    {
+      intent->type = INTENT_WAKE;
+      return 1;
+    }
+
+  if (contains_any(text, note_triggers,
+                   sizeof(note_triggers) / sizeof(note_triggers[0])))
+    {
+      const char *trigger = NULL;
+      size_t trigger_len = 0;
+      size_t i;
+      for (i = 0; i < sizeof(note_triggers) / sizeof(note_triggers[0]); i++)
+        {
+          const char *found = strstr(text, note_triggers[i]);
+          if (found && (!trigger || found < trigger))
+            {
+              trigger = found;
+              trigger_len = strlen(note_triggers[i]);
+            }
+        }
+      if (trigger)
+        {
+          const char *content = trigger + trigger_len;
+          while (*content == ' ' || *content == '\t' || *content == ':' ||
+                 *content == ',')
+            {
+              content++;
+            }
+          while (strncmp(content, "，", 3) == 0 ||
+                 strncmp(content, "：", 3) == 0 ||
+                 strncmp(content, "、", 3) == 0)
+            {
+              content += 3;
+            }
+          while (strncmp(content, "我", 3) == 0 ||
+                 strncmp(content, "一下", 6) == 0 ||
+                 strncmp(content, "记得", 6) == 0)
+            {
+              content += strncmp(content, "我", 3) == 0 ? 3 : 6;
+            }
+          if (!*content)
+            {
+              return 0;
+            }
+          intent->type = INTENT_NOTE;
+          snprintf(intent->text, sizeof(intent->text), "%s", content);
+          return 1;
+        }
+    }
+
+  if (!cancel_focus &&
+      (strstr(text, "专注") || strstr(text, "计时") || strstr(text, "番茄钟")) &&
+      parse_duration_seconds(text, &seconds))
+    {
+      intent->type = INTENT_FOCUS;
+      intent->seconds = seconds;
+      return 1;
+    }
+
+  if (contains_any(text, mood_words, sizeof(mood_words) / sizeof(mood_words[0])))
+    {
+      intent->type = INTENT_MOOD;
+      snprintf(intent->text, sizeof(intent->text), "%s", text);
+      return 1;
+    }
+
+  return 0;
+}
+
+static int run_intent(const assistant_intent_t *intent, char *reply, size_t cap)
+{
+  int rc;
+
+  if (intent->type != INTENT_GAME_ASK && intent->type != INTENT_GAME &&
+      intent->type != INTENT_GAME_CANCEL)
+    {
+      pthread_mutex_lock(&s_intent_lock);
+      s_waiting_game_choice = 0;
+      pthread_mutex_unlock(&s_intent_lock);
+    }
+
+  switch (intent->type)
+    {
+      case INTENT_FOCUS:
+        rc = dm_focus_start_seconds(intent->seconds);
+        if (rc == 0)
+          {
+            int minutes = intent->seconds / 60;
+            int seconds = intent->seconds % 60;
+            if (seconds == 0)
+              {
+                snprintf(reply, cap, "好，%d分钟专注已开始。我陪你。",
+                         minutes);
+              }
+            else if (minutes == 0)
+              {
+                snprintf(reply, cap, "好，%d秒专注已开始。我陪你。", seconds);
+              }
+            else
+              {
+                snprintf(reply, cap,
+                         "好，%d分钟%02d秒专注已开始。我陪你。",
+                         minutes, seconds);
+              }
+            return 0;
+          }
+        snprintf(reply, cap, "已有专注计时正在进行，我没有重置它。先结束当前专注再试。");
+        return -1;
+
+      case INTENT_WAKE:
+        dm_show(PAGE_CHAT);
+        snprintf(reply, cap, "%s", "你好呀，有什么事可以帮到你？");
+        return 0;
+
+      case INTENT_GAME_ASK:
+        pthread_mutex_lock(&s_intent_lock);
+        s_waiting_game_choice = 1;
+        pthread_mutex_unlock(&s_intent_lock);
+        dm_show(PAGE_CHAT);
+        snprintf(reply, cap,
+                 "%s", "想玩什么小游戏？可以说2048、猜数字或者24点。");
+        return 0;
+
+      case INTENT_GAME:
+        pthread_mutex_lock(&s_intent_lock);
+        s_waiting_game_choice = 0;
+        pthread_mutex_unlock(&s_intent_lock);
+        dm_show(intent->game_page);
+        if (intent->game_page == PAGE_2048)
+          {
+            snprintf(reply, cap, "%s", "好，我们来玩2048。游戏已经打开。");
+          }
+        else if (intent->game_page == PAGE_GUESS)
+          {
+            snprintf(reply, cap, "%s", "好，我们来玩猜数字。游戏已经打开。");
+          }
+        else
+          {
+            snprintf(reply, cap, "%s", "好，我们来玩24点。游戏已经打开。");
+          }
+        return 0;
+
+      case INTENT_GAME_CANCEL:
+        pthread_mutex_lock(&s_intent_lock);
+        s_waiting_game_choice = 0;
+        pthread_mutex_unlock(&s_intent_lock);
+        dm_show(PAGE_CHAT);
+        snprintf(reply, cap, "%s", "好，那我们先不玩。想玩的时候再告诉我。");
+        return 0;
+
+      case INTENT_COUNTDOWN:
+        rc = dm_countdown_add_voice(intent->text, intent->year, intent->month,
+                                    intent->day, intent->hour,
+                                    intent->minute);
+        if (rc == 0)
+          {
+            snprintf(reply, cap, "记好了：%s，%d月%d日%02d:%02d提醒你。",
+                     intent->text, intent->month, intent->day, intent->hour,
+                     intent->minute);
+            return 0;
+          }
+        if (rc == -2)
+          {
+            snprintf(reply, cap, "倒数日列表已满，暂时不能添加。请先删除一项。");
+          }
+        else if (rc == -4)
+          {
+            snprintf(reply, cap, "设备日期时间还没校准，无法设置准确提醒。");
+          }
+        else
+          {
+            snprintf(reply, cap, "提醒没有保存成功，请检查日期后再试。");
+          }
+        return -1;
+
+      case INTENT_NOTE:
+        rc = dm_note_add_voice(intent->text);
+        if (rc == 0)
+          {
+            snprintf(reply, cap, "%s", "记下了，已经保存到备忘。");
+            return 0;
+          }
+        if (rc == -2)
+          {
+            snprintf(reply, cap, "备忘已满，暂时不能添加。请先删除一条。");
+          }
+        else
+          {
+            snprintf(reply, cap, "这条备忘没有保存成功，请再说短一点。");
+          }
+        return -1;
+
+      case INTENT_MOOD:
+        dm_health_voice_advice(intent->text, reply, (int)cap);
+        return 0;
+
+      case INTENT_TIME_ERROR:
+        snprintf(reply, cap, "设备日期时间还没同步或校准，我没有创建提醒。请先在设置中校准时间后再试。");
+        return -1;
+
+      default:
+        return -1;
+    }
+}
+
+int dm_assistant_intent_try(const char *text, char *reply, int reply_cap)
+{
+  static const char *const cancel_game_words[] = {
+    "算了", "不玩了", "取消", "先不了", "不用了"
+  };
+  assistant_intent_t parsed;
+  dm_page_t game_page;
+  int parsed_ok;
+  int i;
+
+  if (!text || !text[0] || !reply || reply_cap < 8)
+    {
+      return 0;
+    }
+  parsed_ok = parse_intent(text, &parsed);
+
+  pthread_mutex_lock(&s_intent_lock);
+  if (!parsed_ok && s_waiting_game_choice)
+    {
+      game_page = game_page_from_text(text);
+      if (game_page != PAGE_COUNT)
+        {
+          memset(&parsed, 0, sizeof(parsed));
+          parsed.type = INTENT_GAME;
+          parsed.game_page = game_page;
+          parsed_ok = 1;
+        }
+      else if (contains_any(text, cancel_game_words,
+                            sizeof(cancel_game_words) /
+                              sizeof(cancel_game_words[0])))
+        {
+          memset(&parsed, 0, sizeof(parsed));
+          parsed.type = INTENT_GAME_CANCEL;
+          parsed_ok = 1;
+        }
+    }
+  if (!parsed_ok)
+    {
+      pthread_mutex_unlock(&s_intent_lock);
+      return 0;
+    }
+  if (s_intent_active)
+    {
+      pthread_mutex_unlock(&s_intent_lock);
+      return 0;
+    }
+  s_intent = parsed;
+  s_intent_active = 1;
+  s_intent_executing = 0;
+  s_intent_done = 0;
+  s_intent_reply[0] = '\0';
+  pthread_mutex_unlock(&s_intent_lock);
+
+  for (i = 0; i < INTENT_WAIT_STEPS; i++)
+    {
+      int done;
+      usleep(INTENT_WAIT_US);
+      pthread_mutex_lock(&s_intent_lock);
+      done = s_intent_done;
+      if (done)
+        {
+          int result = s_intent.type == INTENT_WAKE ? 2 : 1;
+          snprintf(reply, (size_t)reply_cap, "%s", s_intent_reply);
+          s_intent_active = 0;
+          s_intent_done = 0;
+          pthread_mutex_unlock(&s_intent_lock);
+          return result;
+        }
+      pthread_mutex_unlock(&s_intent_lock);
+    }
+
+  pthread_mutex_lock(&s_intent_lock);
+  if (!s_intent_executing)
+    {
+      s_intent_active = 0;
+      s_intent_done = 0;
+      pthread_mutex_unlock(&s_intent_lock);
+      return 0;
+    }
+  pthread_mutex_unlock(&s_intent_lock);
+
+  /* An operation already started on the LVGL thread; allow it to finish. */
+  for (i = 0; i < 40; i++)
+    {
+      usleep(INTENT_WAIT_US);
+      pthread_mutex_lock(&s_intent_lock);
+      if (s_intent_done)
+        {
+          int result = s_intent.type == INTENT_WAKE ? 2 : 1;
+          snprintf(reply, (size_t)reply_cap, "%s", s_intent_reply);
+          s_intent_active = 0;
+          s_intent_done = 0;
+          pthread_mutex_unlock(&s_intent_lock);
+          return result;
+        }
+      pthread_mutex_unlock(&s_intent_lock);
+    }
+  pthread_mutex_lock(&s_intent_lock);
+  s_intent_active = 0;
+  s_intent_executing = 0;
+  s_intent_done = 0;
+  pthread_mutex_unlock(&s_intent_lock);
+  return 0;
+}
+
+void dm_assistant_intent_tick(void)
+{
+  assistant_intent_t intent;
+  char reply[INTENT_REPLY_MAX];
+
+  pthread_mutex_lock(&s_intent_lock);
+  if (!s_intent_active || s_intent_executing || s_intent_done)
+    {
+      pthread_mutex_unlock(&s_intent_lock);
+      return;
+    }
+  intent = s_intent;
+  s_intent_executing = 1;
+  pthread_mutex_unlock(&s_intent_lock);
+
+  reply[0] = '\0';
+  (void)run_intent(&intent, reply, sizeof(reply));
+
+  pthread_mutex_lock(&s_intent_lock);
+  snprintf(s_intent_reply, sizeof(s_intent_reply), "%s", reply);
+  s_intent_done = 1;
+  s_intent_executing = 0;
+  pthread_mutex_unlock(&s_intent_lock);
+}
+
+#endif /* CONFIG_DESKMATE_APP */
