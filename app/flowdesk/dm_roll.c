@@ -3,6 +3,7 @@
  ****************************************************************************/
 
 #include "deskmate.h"
+#include <stdio.h>
 
 #ifdef CONFIG_DESKMATE_APP
 
@@ -148,12 +149,20 @@ void dm_clock_create(dm_clock_t *c, lv_obj_t *parent, int x, int y, int w,
     }
 
   colon_x = 2 * dw + gap_colon / 4;
-  {
-    lv_obj_t *col = lv_label_create(c->box);
-    lv_label_set_text(col, ":");
-    dm_style(col, font, C_DIM);
-    lv_obj_set_pos(col, colon_x, 0);
-  }
+  c->colon = lv_label_create(c->box);
+  lv_label_set_text(c->colon, ":");
+  dm_style(c->colon, font, C_DIM);
+  lv_obj_set_pos(c->colon, colon_x, 0);
+
+  /* Durations above 99 minutes use a centered text label instead of clipping
+   * the three-digit minute value in the four-wheel MM:SS layout. */
+  c->wide = lv_label_create(c->box);
+  lv_label_set_text(c->wide, "");
+  dm_style(c->wide, font, C_INK);
+  lv_obj_set_width(c->wide, w);
+  lv_obj_set_style_text_align(c->wide, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_center(c->wide);
+  lv_obj_add_flag(c->wide, LV_OBJ_FLAG_HIDDEN);
 }
 
 void dm_clock_set(dm_clock_t *c, int32_t seconds_left)
@@ -166,6 +175,7 @@ void dm_clock_set(dm_clock_t *c, int32_t seconds_left)
   int h;
   int i;
   bool animate = true;
+  char wide_text[16];
 
   if (!c || !c->box)
     {
@@ -174,7 +184,22 @@ void dm_clock_set(dm_clock_t *c, int32_t seconds_left)
 
   if (mm > 99)
     {
-      mm = 99;
+      snprintf(wide_text, sizeof(wide_text), "%d:%02d", mm, ss);
+      lv_label_set_text(c->wide, wide_text);
+      lv_obj_clear_flag(c->wide, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(c->colon, LV_OBJ_FLAG_HIDDEN);
+      for (i = 0; i < 4; i++)
+        {
+          lv_obj_add_flag(c->d[i].clip, LV_OBJ_FLAG_HIDDEN);
+        }
+      return;
+    }
+
+  lv_obj_add_flag(c->wide, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(c->colon, LV_OBJ_FLAG_HIDDEN);
+  for (i = 0; i < 4; i++)
+    {
+      lv_obj_clear_flag(c->d[i].clip, LV_OBJ_FLAG_HIDDEN);
     }
 
   digits[0] = mm / 10;

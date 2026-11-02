@@ -3,18 +3,20 @@
  ****************************************************************************/
 
 #include "deskmate.h"
+#include "dm_voice.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <pthread.h>
 
 #ifdef CONFIG_DESKMATE_APP
 
 #define WATER_PATH "/data/deskmate_water.txt"
 #define COUNTDOWN_PATH "/data/deskmate_countdown.txt"
 #define CD_MAX 8
-#define CD_NAME_MAX 16
+#define CD_NAME_MAX 48
 
 static void life_back(lv_event_t *e)
 {
@@ -431,6 +433,10 @@ typedef struct
   int y;
   int m;
   int d;
+  int hour;
+  int minute;
+  int has_alarm;
+  int alarm_fired;
   char name[CD_NAME_MAX];
 } cd_item_t;
 
@@ -448,31 +454,54 @@ static lv_obj_t *s_cd_names[CD_MAX];
 static lv_obj_t *s_cd_form_box;
 static lv_obj_t *s_cd_date_l;
 static lv_obj_t *s_cd_name_btns[5];
+static lv_obj_t *s_cd_alert;
+static lv_obj_t *s_cd_alert_name;
+static int s_cd_alert_idx = -1;
 
 static const char *const s_cd_presets[5] = {
   "生日", "考试", "旅行", "纪念日", "项目"
 };
 
-static void cd_save(void)
+static int cd_save(void)
 {
   FILE *f = fopen(COUNTDOWN_PATH, "w");
   int i;
+  int ok = 1;
   if (!f)
     {
-      return;
+      return -1;
     }
   for (i = 0; i < s_cd_n; i++)
     {
-      fprintf(f, "%04d-%02d-%02d %s\n", s_cd[i].y, s_cd[i].m, s_cd[i].d,
-              s_cd[i].name);
+      int rc;
+      if (s_cd[i].has_alarm)
+        {
+          rc = fprintf(f, "%04d-%02d-%02d %02d:%02d %d %s\n",
+                       s_cd[i].y, s_cd[i].m, s_cd[i].d, s_cd[i].hour,
+                       s_cd[i].minute, s_cd[i].alarm_fired, s_cd[i].name);
+        }
+      else
+        {
+          rc = fprintf(f, "%04d-%02d-%02d %s\n", s_cd[i].y, s_cd[i].m,
+                       s_cd[i].d, s_cd[i].name);
+        }
+      if (rc < 0)
+        {
+          ok = 0;
+          break;
+        }
     }
-  fclose(f);
+  if (fclose(f) != 0)
+    {
+      ok = 0;
+    }
+  return ok ? 0 : -1;
 }
 
 static void cd_load(void)
 {
   FILE *f = fopen(COUNTDOWN_PATH, "r");
-  char line[64];
+  char line[128];
   s_cd_n = 0;
   s_cd_sel = 0;
   if (!f)
@@ -481,6 +510,7 @@ static void cd_load(void)
       time_t t = time(NULL);
       struct tm tmv;
       localtime_r(&t, &tmv);
+      memset(s_cd, 0, sizeof(s_cd));
       s_cd[0].y = tmv.tm_year + 1900;
       s_cd[0].m = 10;
       s_cd[0].d = 1;
@@ -492,19 +522,44 @@ static void cd_load(void)
       s_cd_n = 2;
       return;
     }
+  memset(s_cd, 0, sizeof(s_cd));
   while (s_cd_n < CD_MAX && fgets(line, sizeof(line), f))
     {
       int y;
       int m;
       int d;
+      int hour;
+      int minute;
+      int fired;
       char name[CD_NAME_MAX];
-      if (sscanf(line, "%d-%d-%d %15s", &y, &m, &d, name) == 4)
+      int fields;
+
+      fields = sscanf(line, "%d-%d-%d %d:%d %d %47[^\r\n]",
+                      &y, &m, &d, &hour, &minute, &fired, name);
+      if (fields == 7 && m >= 1 && m <= 12 && d >= 1 && d <= 31 &&
+          hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59)
         {
           s_cd[s_cd_n].y = y;
           s_cd[s_cd_n].m = m;
           s_cd[s_cd_n].d = d;
+          s_cd[s_cd_n].hour = hour;
+          s_cd[s_cd_n].minute = minute;
+          s_cd[s_cd_n].has_alarm = 1;
+          s_cd[s_cd_n].alarm_fired = fired ? 1 : 0;
           snprintf(s_cd[s_cd_n].name, CD_NAME_MAX, "%s", name);
           s_cd_n++;
+        }
+      else
+        {
+          fields = sscanf(line, "%d-%d-%d %47[^\r\n]", &y, &m, &d, name);
+          if (fields == 4 && m >= 1 && m <= 12 && d >= 1 && d <= 31)
+            {
+              s_cd[s_cd_n].y = y;
+              s_cd[s_cd_n].m = m;
+              s_cd[s_cd_n].d = d;
+              snprintf(s_cd[s_cd_n].name, CD_NAME_MAX, "%s", name);
+              s_cd_n++;
+            }
         }
     }
   fclose(f);
@@ -539,10 +594,207 @@ static int cd_days(const cd_item_t *it)
   }
 }
 
+static void cd_paint(void);
+
+static time_t cd_alarm_time(const cd_item_t *item)
+{
+  struct tm tmv;
+  struct tm verify;
+  time_t target;
+
+  if (!item || !item->has_alarm || item->m < 1 || item->m > 12 ||
+      item->d < 1 || item->d > 31 || item->hour < 0 || item->hour > 23 ||
+      item->minute < 0 || item->minute > 59)
+    {
+      return (time_t)-1;
+    }
+  memset(&tmv, 0, sizeof(tmv));
+  tmv.tm_year = item->y - 1900;
+  tmv.tm_mon = item->m - 1;
+  tmv.tm_mday = item->d;
+  tmv.tm_hour = item->hour;
+  tmv.tm_min = item->minute;
+  tmv.tm_isdst = -1;
+  target = mktime(&tmv);
+  if (target == (time_t)-1)
+    {
+      return (time_t)-1;
+    }
+  localtime_r(&target, &verify);
+  if (verify.tm_year != item->y - 1900 || verify.tm_mon != item->m - 1 ||
+      verify.tm_mday != item->d || verify.tm_hour != item->hour ||
+      verify.tm_min != item->minute)
+    {
+      return (time_t)-1;
+    }
+  return target;
+}
+
+int dm_countdown_add_voice(const char *name, int year, int month, int day,
+                           int hour, int minute)
+{
+  time_t now = time(NULL);
+  struct tm current;
+  struct tm target_tm;
+  struct tm verify;
+  time_t target;
+  size_t len;
+
+  if (!name || !name[0] || month < 1 || month > 12 || day < 1 || day > 31 ||
+      hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+      year < 2024 || year > 2099)
+    {
+      return -1;
+    }
+  if (s_cd_n >= CD_MAX)
+    {
+      return -2;
+    }
+  localtime_r(&now, &current);
+  if (current.tm_year + 1900 < 2024)
+    {
+      return -4;
+    }
+
+  memset(&target_tm, 0, sizeof(target_tm));
+  target_tm.tm_year = year - 1900;
+  target_tm.tm_mon = month - 1;
+  target_tm.tm_mday = day;
+  target_tm.tm_hour = hour;
+  target_tm.tm_min = minute;
+  target_tm.tm_isdst = -1;
+  target = mktime(&target_tm);
+  if (target == (time_t)-1)
+    {
+      return -1;
+    }
+  localtime_r(&target, &verify);
+  if (verify.tm_year != year - 1900 || verify.tm_mon != month - 1 ||
+      verify.tm_mday != day || verify.tm_hour != hour ||
+      verify.tm_min != minute || target <= now)
+    {
+      return -1;
+    }
+
+  len = strlen(name);
+  if (len >= CD_NAME_MAX)
+    {
+      len = CD_NAME_MAX - 1;
+      while (len > 0 && ((unsigned char)name[len] & 0xc0u) == 0x80u)
+        {
+          len--;
+        }
+    }
+  if (len == 0)
+    {
+      return -1;
+    }
+
+  memset(&s_cd[s_cd_n], 0, sizeof(s_cd[s_cd_n]));
+  s_cd[s_cd_n].y = year;
+  s_cd[s_cd_n].m = month;
+  s_cd[s_cd_n].d = day;
+  s_cd[s_cd_n].hour = hour;
+  s_cd[s_cd_n].minute = minute;
+  s_cd[s_cd_n].has_alarm = 1;
+  memcpy(s_cd[s_cd_n].name, name, len);
+  s_cd[s_cd_n].name[len] = '\0';
+  s_cd_sel = s_cd_n;
+  s_cd_n++;
+  if (cd_save() != 0)
+    {
+      s_cd_n--;
+      memset(&s_cd[s_cd_n], 0, sizeof(s_cd[s_cd_n]));
+      return -3;
+    }
+  cd_paint();
+  dm_show(PAGE_COUNTDOWN);
+  return 0;
+}
+
+static void cd_alarm_dismiss_cb(lv_event_t *e)
+{
+  (void)e;
+  s_cd_alert_idx = -1;
+  if (s_cd_alert)
+    {
+      lv_obj_add_flag(s_cd_alert, LV_OBJ_FLAG_HIDDEN);
+    }
+  dm_show(PAGE_COUNTDOWN);
+}
+
+static void *cd_alarm_beep_worker(void *arg)
+{
+  (void)arg;
+  (void)dm_voice_beep();
+  return NULL;
+}
+
+static void cd_alarm_beep_async(void)
+{
+  pthread_t th;
+  pthread_attr_t attr;
+
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 16384);
+  if (pthread_create(&th, &attr, cd_alarm_beep_worker, NULL) == 0)
+    {
+      pthread_detach(th);
+    }
+  pthread_attr_destroy(&attr);
+}
+
+static void cd_alarm_tick(void)
+{
+  time_t now;
+  int i;
+
+  if (s_cd_alert_idx >= 0)
+    {
+      return;
+    }
+  now = time(NULL);
+  for (i = 0; i < s_cd_n; i++)
+    {
+      time_t due;
+      if (!s_cd[i].has_alarm || s_cd[i].alarm_fired)
+        {
+          continue;
+        }
+      due = cd_alarm_time(&s_cd[i]);
+      if (due == (time_t)-1 || now < due)
+        {
+          continue;
+        }
+
+      s_cd[i].alarm_fired = 1;
+      (void)cd_save();
+      s_cd_alert_idx = i;
+      dm_show(PAGE_COUNTDOWN);
+      if (s_cd_alert_name)
+        {
+          lv_label_set_text(s_cd_alert_name, s_cd[i].name);
+        }
+      if (s_cd_alert)
+        {
+          lv_obj_clear_flag(s_cd_alert, LV_OBJ_FLAG_HIDDEN);
+          lv_obj_move_foreground(s_cd_alert);
+        }
+      if (g_dm_dock)
+        {
+          lv_obj_add_flag(g_dm_dock, LV_OBJ_FLAG_HIDDEN);
+        }
+      dm_say("提醒时间到了", "Reminder time");
+      cd_alarm_beep_async();
+      return;
+    }
+}
+
 static void cd_paint(void)
 {
   int i;
   char buf[32];
+  char name_line[64];
 
   for (i = 0; i < CD_MAX; i++)
     {
@@ -559,7 +811,16 @@ static void cd_paint(void)
               lv_color_hex(i == s_cd_sel ? 0x0d3a4a : C_BTN), LV_PART_MAIN);
           if (s_cd_names[i])
             {
-              lv_label_set_text(s_cd_names[i], s_cd[i].name);
+              if (s_cd[i].has_alarm)
+                {
+                  snprintf(name_line, sizeof(name_line), "%s %02d:%02d",
+                           s_cd[i].name, s_cd[i].hour, s_cd[i].minute);
+                  lv_label_set_text(s_cd_names[i], name_line);
+                }
+              else
+                {
+                  lv_label_set_text(s_cd_names[i], s_cd[i].name);
+                }
             }
           if (s_cd_days[i])
             {
@@ -646,6 +907,7 @@ static void cd_del_cb(lv_event_t *e)
       s_cd[i] = s_cd[i + 1];
     }
   s_cd_n--;
+  memset(&s_cd[s_cd_n], 0, sizeof(s_cd[s_cd_n]));
   if (s_cd_sel >= s_cd_n)
     {
       s_cd_sel = s_cd_n > 0 ? s_cd_n - 1 : 0;
@@ -713,6 +975,7 @@ static void cd_save_cb(lv_event_t *e)
     {
       return;
     }
+  memset(&s_cd[s_cd_n], 0, sizeof(s_cd[s_cd_n]));
   s_cd[s_cd_n].y = s_cd_fy;
   s_cd[s_cd_n].m = s_cd_fm;
   s_cd[s_cd_n].d = s_cd_fd;
@@ -765,6 +1028,8 @@ void dm_create_countdown(void)
       lv_obj_add_event_cb(row, cd_row_cb, LV_EVENT_CLICKED,
                           (void *)(intptr_t)i);
       s_cd_names[i] = dm_lbl(row, "", "", g_dm_font_s, C_INK);
+      lv_obj_set_width(s_cd_names[i], 220);
+      lv_label_set_long_mode(s_cd_names[i], LV_LABEL_LONG_DOT);
       lv_obj_set_pos(s_cd_names[i], 4, 3);
       s_cd_days[i] = dm_lbl(row, "", "", g_dm_font_s, C_ACCENT);
       lv_obj_align(s_cd_days[i], LV_ALIGN_RIGHT_MID, -4, 0);
@@ -824,6 +1089,31 @@ void dm_create_countdown(void)
              cd_save_cb, NULL);
   lv_obj_set_pos(b, 8, 122);
 
+  s_cd_alert = lv_obj_create(g_dm_root);
+  lv_obj_set_size(s_cd_alert, DM_SCR_W, DM_SCR_H);
+  lv_obj_set_pos(s_cd_alert, 0, 0);
+  lv_obj_set_style_bg_color(s_cd_alert, lv_color_hex(0x14202b), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_cd_alert, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_cd_alert, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_cd_alert, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(s_cd_alert, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(s_cd_alert, LV_OBJ_FLAG_HIDDEN);
+  {
+    lv_obj_t *title = dm_lbl(s_cd_alert, "提醒时间到了", "Reminder time",
+                             g_dm_font_l, C_ACCENT);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(title, 300);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 54);
+    s_cd_alert_name = dm_lbl(s_cd_alert, "", "", g_dm_font_m, C_INK);
+    lv_obj_set_style_text_align(s_cd_alert_name, LV_TEXT_ALIGN_CENTER,
+                                LV_PART_MAIN);
+    lv_obj_set_width(s_cd_alert_name, 300);
+    lv_obj_align(s_cd_alert_name, LV_ALIGN_TOP_MID, 0, 104);
+    b = dm_btn(s_cd_alert, "知道了", "Dismiss", 180, 38, C_ACCENT,
+               C_EYE, cd_alarm_dismiss_cb, NULL);
+    lv_obj_align(b, LV_ALIGN_TOP_MID, 0, 162);
+  }
+
   cd_load();
   cd_paint();
 }
@@ -840,6 +1130,7 @@ void dm_create_life(void)
 void dm_life_tick(void)
 {
   dm_water_tick();
+  cd_alarm_tick();
 }
 
 #endif /* CONFIG_DESKMATE_APP */

@@ -150,6 +150,7 @@ static int run_curl_command(const char *url, const char *request_path,
 
 static char s_last_reply[CHAT_MAX_REPLY];
 static int s_last_request_remote_ok;
+static int s_last_request_intent_ok;
 static char s_persona_ctx[512];
 
 static const char *const s_local_lines[] = {
@@ -412,6 +413,11 @@ int dm_chat_ai_remote_ok(void)
   return s_last_request_remote_ok;
 }
 
+int dm_chat_ai_intent_ok(void)
+{
+  return s_last_request_intent_ok;
+}
+
 void dm_chat_ai_set_persona(const char *persona)
 {
   if (!persona)
@@ -438,9 +444,18 @@ const char *dm_chat_ai_ask(const char *user_text)
 
   s_last_reply[0] = '\0';
   s_last_request_remote_ok = 0;
+  s_last_request_intent_ok = 0;
   if (!user_text || !user_text[0])
     {
       return local_reply("");
+    }
+
+  if (dm_assistant_intent_try(user_text, s_last_reply,
+                               sizeof(s_last_reply)) > 0)
+    {
+      s_last_request_intent_ok = 1;
+      dm_chat_hist_push(user_text, s_last_reply);
+      return s_last_reply;
     }
 
   if (!dm_wifi_connected())
@@ -466,7 +481,7 @@ const char *dm_chat_ai_ask(const char *user_text)
     }
 
   persona_src = s_persona_ctx[0] ? s_persona_ctx
-                                 : "你是openvela小助手，桌边陪伴助手，回答简洁温暖，不超过80字，用中文。";
+                                 : "你是openvela小助手，桌边陪伴助手，回答简洁温暖，不超过80字，用中文。只提供建议；不要声称已启动计时、保存备忘或创建提醒，除非应用明确反馈执行成功。遇到情绪困扰时给予温和、非诊断性的支持。";
   if (json_escape(persona_src, persona, sizeof(persona)) < 0)
     {
       return local_reply(user_text);

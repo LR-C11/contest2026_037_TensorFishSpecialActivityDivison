@@ -190,6 +190,64 @@ void dm_update_run_clock(void)
   dm_clock_set(&s_clock, g_dm.focus_left);
 }
 
+int dm_focus_start_minutes(int32_t minutes)
+{
+  if (g_dm.focus_run && !g_dm.focus_finished)
+    {
+      return -1;
+    }
+
+  if (minutes < 1)
+    {
+      minutes = 1;
+    }
+  if (minutes > 120)
+    {
+      minutes = 120;
+    }
+  g_dm.focus_custom_min = minutes;
+  apply_minutes(minutes);
+  mark_preset(4);
+  dm_focus_start();
+  return 0;
+}
+
+int dm_focus_start_seconds(int32_t seconds)
+{
+  int32_t display_minutes;
+
+  if (g_dm.focus_run && !g_dm.focus_finished)
+    {
+      return -1;
+    }
+  if (seconds < 1 || seconds > 120 * 60)
+    {
+      return -2;
+    }
+
+  display_minutes = (seconds + 59) / 60;
+  g_dm.focus_custom_min = display_minutes;
+  g_dm.focus_sel_min = display_minutes;
+  g_dm.focus_total = seconds;
+  g_dm.focus_left = seconds;
+  g_dm.focus_run = false;
+  g_dm.focus_finished = false;
+  if (s_step_val)
+    {
+      char b[8];
+      lv_snprintf(b, sizeof(b), "%ld", (long)display_minutes);
+      lv_label_set_text(s_step_val, b);
+    }
+  paint_home_status();
+  mark_preset(4);
+  if (s_clock_ready)
+    {
+      dm_clock_set(&s_clock, seconds);
+    }
+  dm_focus_start();
+  return 0;
+}
+
 void dm_focus_start(void)
 {
   static const char *zh[] = {
@@ -301,7 +359,10 @@ void dm_focus_toggle_pause(void)
 {
   if (g_dm.page == PAGE_FOCUS_DONE || g_dm.focus_finished)
     {
-      apply_minutes(g_dm.focus_sel_min);
+      /* Restart the exact session duration, including spoken seconds. */
+      g_dm.focus_left = g_dm.focus_total;
+      g_dm.focus_run = false;
+      g_dm.focus_finished = false;
       dm_focus_start();
       return;
     }

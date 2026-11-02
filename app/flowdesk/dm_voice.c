@@ -1451,7 +1451,7 @@ static int chat_reply(const char *user, char *out, int cap)
 
   n = snprintf(body, sizeof(body),
                "{\"model\":\"%s\",\"messages\":["
-               "{\"role\":\"system\",\"content\":\"你是openvela语音小助手，口语化简短回答，不超过60字。\"},"
+               "{\"role\":\"system\",\"content\":\"你是openvela语音小助手，口语化简短回答，不超过60字。只提供建议；不要声称已启动计时、保存备忘或创建提醒，除非应用明确反馈执行成功。情绪困扰时给予温和、非诊断性支持。\"},"
                "%s"
                "{\"role\":\"user\",\"content\":\"%s\"}],"
                "\"max_completion_tokens\":400,\"thinking\":{\"type\":\"disabled\"}}",
@@ -1604,12 +1604,35 @@ out:
   return rc;
 }
 
+static int voice_play_wake_samples_unlocked(void)
+{
+  static const char *const samples[] = {
+    WAV_PREVIEW_BINGTANG,
+    WAV_PREVIEW_JASMINE,
+    WAV_PREVIEW_SODA,
+  };
+  int i;
+
+  for (i = 0; i < (int)(sizeof(samples) / sizeof(samples[0])); i++)
+    {
+      syslog(LOG_INFO, "[dm-voice] playing wake sample index=%d\n", i);
+      if (play_wav(samples[i]) != 0)
+        {
+          syslog(LOG_ERR, "[dm-voice] wake sample playback failed index=%d\n",
+                 i);
+          return -1;
+        }
+    }
+  return 0;
+}
+
 static int voice_asr_chat_tts_unlocked(const char *wav_path, char *reply,
                                        int cap)
 {
   char text[256];
   const char *asr_path;
   int play_rc = -1;
+  int intent_handled;
 
   if (!wav_path || !reply || cap < 8)
     {
@@ -1637,7 +1660,12 @@ static int voice_asr_chat_tts_unlocked(const char *wav_path, char *reply,
     }
 
   s_st = DM_VOICE_CHAT;
-  if (chat_reply(text, reply, cap) != 0)
+  intent_handled = dm_assistant_intent_try(text, reply, cap);
+  if (intent_handled > 0)
+    {
+      dm_chat_hist_push(text, reply);
+    }
+  else if (chat_reply(text, reply, cap) != 0)
     {
       if (s_last_failure == DM_VOICE_FAILURE_NONE)
         {
@@ -1651,15 +1679,29 @@ static int voice_asr_chat_tts_unlocked(const char *wav_path, char *reply,
 
   /* Preserve the text answer even if playback fails; the caller can show
    * that the reply is text-only rather than pretending the speaker worked. */
-  s_st = DM_VOICE_TTS;
-  if (tts_synth(reply, WAV_TTS, dm_voice_profile_api_id()) == 0)
+  if (intent_handled == 2)
     {
+      /* Wake phrase response demonstrates all three user-provided voices in
+       * their existing order; regular profile audition behavior is unchanged. */
       s_st = DM_VOICE_PLAY;
-      play_rc = play_wav(WAV_TTS);
+      play_rc = voice_play_wake_samples_unlocked();
+      if (play_rc != 0 && s_last_failure == DM_VOICE_FAILURE_NONE)
+        {
+          s_last_failure = DM_VOICE_FAILURE_TTS;
+        }
     }
-  else if (s_last_failure == DM_VOICE_FAILURE_NONE)
+  else
     {
-      s_last_failure = DM_VOICE_FAILURE_TTS;
+      s_st = DM_VOICE_TTS;
+      if (tts_synth(reply, WAV_TTS, dm_voice_profile_api_id()) == 0)
+        {
+          s_st = DM_VOICE_PLAY;
+          play_rc = play_wav(WAV_TTS);
+        }
+      else if (s_last_failure == DM_VOICE_FAILURE_NONE)
+        {
+          s_last_failure = DM_VOICE_FAILURE_TTS;
+        }
     }
   s_st = DM_VOICE_IDLE;
   return play_rc == 0 ? 0 : 1;

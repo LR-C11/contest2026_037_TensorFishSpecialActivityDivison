@@ -204,6 +204,8 @@ typedef struct {
 
 typedef struct {
   lv_obj_t *box;
+  lv_obj_t *colon;
+  lv_obj_t *wide;
   dm_digit_t d[4];
 } dm_clock_t;
 
@@ -248,10 +250,13 @@ void dm_proactive_tick(void);
 void dm_proactive_focus_done(int32_t minutes);
 int dm_dict_ai_define(const char *word, char *out, int cap);
 void dm_chat_tick(void);
+void dm_assistant_intent_tick(void);
+int dm_assistant_intent_try(const char *text, char *reply, int reply_cap);
 void dm_volume_tick(void);
 int dm_chat_ai_available(void);
 const char *dm_chat_ai_ask(const char *user_text);
 int dm_chat_ai_remote_ok(void);
+int dm_chat_ai_intent_ok(void);
 const char *dm_chat_local_reply(const char *user_text);
 void dm_chat_hist_reset(void);
 void dm_chat_hist_push(const char *user, const char *assistant);
@@ -262,6 +267,8 @@ void dm_dock_highlight(dm_page_t p);
 void dm_focus_home_tick(void);
 void dm_focus_run_tick(void);
 void dm_focus_start(void);
+int dm_focus_start_minutes(int32_t minutes);
+int dm_focus_start_seconds(int32_t seconds);
 void dm_focus_end(void);
 void dm_focus_toggle_pause(void);
 void dm_update_run_clock(void);
@@ -275,6 +282,10 @@ int dm_word_today_n(void);
 int dm_sensor_last_th(float *t_c, float *h_pct);
 void dm_health_refresh(void);
 int dm_health_score(void);
+void dm_health_voice_advice(const char *user_text, char *out, int cap);
+int dm_countdown_add_voice(const char *name, int year, int month, int day,
+                           int hour, int minute);
+int dm_note_add_voice(const char *text);
 
 /* settings / wifi */
 void dm_create_settings(void);

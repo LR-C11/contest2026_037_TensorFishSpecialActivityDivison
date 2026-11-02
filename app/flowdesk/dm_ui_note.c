@@ -134,20 +134,82 @@ static void note_paint(void)
     }
 }
 
-static void note_save(void)
+static int note_save(void)
 {
   FILE *f = fopen(NOTE_PATH, "w");
   int i;
+  int ok = 1;
 
   if (!f)
     {
-      return;
+      return -1;
     }
   for (i = 0; i < s_note_n; i++)
     {
-      fprintf(f, "%s\n", s_notes[i]);
+      if (fprintf(f, "%s\n", s_notes[i]) < 0)
+        {
+          ok = 0;
+          break;
+        }
     }
-  fclose(f);
+  if (fclose(f) != 0)
+    {
+      ok = 0;
+    }
+  return ok ? 0 : -1;
+}
+
+int dm_note_add_voice(const char *text)
+{
+  size_t len;
+  size_t i;
+  size_t copy_len;
+
+  if (!text || !text[0])
+    {
+      return -1;
+    }
+  if (s_note_n >= NOTE_MAX)
+    {
+      return -2;
+    }
+
+  len = strlen(text);
+  copy_len = len < NOTE_LEN_MAX - 1 ? len : NOTE_LEN_MAX - 1;
+  if (copy_len < len)
+    {
+      while (copy_len > 0 &&
+             (((unsigned char)text[copy_len] & 0xc0u) == 0x80u))
+        {
+          copy_len--;
+        }
+    }
+  for (i = 0; i < copy_len; i++)
+    {
+      s_notes[s_note_n][i] = (text[i] == '\n' || text[i] == '\r')
+                               ? ' ' : text[i];
+    }
+  s_notes[s_note_n][copy_len] = '\0';
+  if (!s_notes[s_note_n][0])
+    {
+      return -1;
+    }
+
+  s_note_n++;
+  s_note_sel = s_note_n - 1;
+  if (note_save() != 0)
+    {
+      s_note_n--;
+      s_notes[s_note_n][0] = '\0';
+      return -3;
+    }
+  note_paint();
+  if (s_tip)
+    {
+      lv_label_set_text(s_tip, dm_t("语音已添加到备忘", "Voice note saved"));
+    }
+  dm_show(PAGE_NOTE);
+  return 0;
 }
 
 static void note_load(void)

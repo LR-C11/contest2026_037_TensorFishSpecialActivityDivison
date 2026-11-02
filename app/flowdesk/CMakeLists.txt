@@ -27,5 +27,6 @@ if(CONFIG_DESKMATE_APP)
       dm_ui_chat.c
       dm_chat_ai.c
       dm_ui_mbti.c
+      dm_assistant.c
     INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR})
 endif()

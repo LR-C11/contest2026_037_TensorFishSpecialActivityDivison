@@ -16,7 +16,7 @@
 #include <errno.h>
 #include <time.h>
 
-#define CHAT_LINE_MAX 96
+#define CHAT_LINE_MAX 224
 #define CHAT_FACE_SZ 76
 
 static lv_obj_t *s_ans;
@@ -186,12 +186,16 @@ static void *voice_worker(void *arg)
     {
       const char *r = dm_chat_ai_ask(s_pending);
       snprintf(s_out_ans, sizeof(s_out_ans), "%s", r ? r : "……");
-      if (r && r[0] && dm_chat_ai_remote_ok())
+      if (r && r[0] &&
+          (dm_chat_ai_remote_ok() ||
+           (dm_chat_ai_intent_ok() && dm_wifi_connected())))
         {
           if (dm_voice_tts_play(r) == 0)
             {
               snprintf(s_out_sub, sizeof(s_out_sub), "%s",
-                       dm_t("已通过喇叭播放回复", "Reply played on speaker"));
+                       dm_chat_ai_intent_ok()
+                         ? dm_t("已语音回复本地功能结果", "Local action result spoken")
+                         : dm_t("已通过喇叭播放回复", "Reply played on speaker"));
             }
           else
             {
@@ -199,6 +203,11 @@ static void *voice_worker(void *arg)
                        dm_t("文字回复已显示，语音播报失败",
                             "Text reply shown; speech playback failed"));
             }
+        }
+      else if (dm_chat_ai_intent_ok())
+        {
+          snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                   dm_t("本地功能已处理，离线时不播报", "Local action handled; no offline speech"));
         }
       else if (r && r[0])
         {
