@@ -49,8 +49,6 @@
 #define TXT_ASR      "/tmp/dm_voice_asr.txt"
 #define TXT_CHAT     "/tmp/dm_voice_chat.txt"
 #define JSON_REQ     "/tmp/dm_voice_req.json"
-#define VOICE_HTTP_STATUS "/tmp/dm_voice_http_status.txt"
-#define VOICE_CURL_ERROR  "/tmp/dm_voice_curl_error.txt"
 
 #define REC_RATE     8000
 #define REC_BITS     16
@@ -774,22 +772,31 @@ static int voice_key_load(char *key, size_t key_cap)
   return valid;
 }
 
-/* Curl reads a short-lived config file. Restrictive permissions are applied
- * when supported, but must not block requests on filesystems where chmod is
- * unavailable. Invoke curl through NuttX system(); the key stays out of argv. */
-static int run_curl_command(const char *line)
+/* Put the complete curl request in curl's config file. NuttX NSH has a small
+ * command argument limit, so passing every curl option through system() makes
+ * the shell split one logical request into too many arguments. The command
+ * below deliberately contains only: curl -K <config>. The API key stays out
+ * of argv and the temporary config is removed after the request. */
+static int run_curl_command(const char *url, const char *request_path,
+                            const char *out_path, int timeout_sec)
 {
   char key[128];
   FILE *kf;
-  int key_write_ok;
-  int key_close_rc;
+  int config_ok;
+  int close_rc;
   int rc;
   int saved_errno;
 
-  if (!line || !line[0] || !voice_key_load(key, sizeof(key)))
+  if (!url || !request_path || !out_path || timeout_sec < 1 ||
+      timeout_sec > 120 || strchr(url, '"') || strchr(url, '\\') ||
+      strchr(url, '\r') || strchr(url, '\n') || strchr(request_path, '"') ||
+      strchr(request_path, '\\') || strchr(request_path, '\r') ||
+      strchr(request_path, '\n') || strchr(out_path, '"') ||
+      strchr(out_path, '\\') || strchr(out_path, '\r') ||
+      strchr(out_path, '\n') || !voice_key_load(key, sizeof(key)))
     {
       s_last_failure = DM_VOICE_FAILURE_API_KEY;
-      syslog(LOG_ERR, "[dm-voice] runtime API key or curl command unavailable\n");
+      syslog(LOG_ERR, "[dm-voice] invalid curl request configuration\n");
       return -1;
     }
 
@@ -802,17 +809,29 @@ static int run_curl_command(const char *line)
     }
   if (chmod(MIMO_CURL_CONFIG, S_IRUSR | S_IWUSR) != 0)
     {
-      /* NuttX tmpfs may not implement chmod (ENOSYS). The config is still
-       * used only for this request, never passed on argv, and unlinked below. */
+      /* NuttX tmpfs may not implement chmod (ENOSYS); do not block a request. */
       syslog(LOG_WARNING,
              "[dm-voice] chmod unavailable for curl config errno=%d; continuing\n",
              errno);
     }
-  key_write_ok = fprintf(kf, "header = \"Authorization: Bearer %s\"\n",
-                         key) > 0;
-  key_close_rc = fclose(kf);
+
+  config_ok = fputs("silent\nshow-error\nfail\n",
+                    kf) != EOF &&
+              fprintf(kf, "max-time = %d\n", timeout_sec) > 0 &&
+              fprintf(kf, "url = \"%s\"\n", url) > 0 &&
+              fputs("cacert = \"/resource/etc/ssl/curl/ca-certificates.crt\"\n"
+                    "request = \"POST\"\n"
+                    "header = \"Content-Type: application/json\"\n",
+                    kf) != EOF &&
+              fprintf(kf, "header = \"Authorization: Bearer %s\"\n",
+                      key) > 0 &&
+              fprintf(kf, "data = \"@%s\"\noutput = \"%s\"\n",
+                      request_path, out_path) > 0 &&
+              fputs("write-out = \"HTTP_STATUS:%{http_code}\\n\"\n",
+                    kf) != EOF;
+  close_rc = fclose(kf);
   memset(key, 0, sizeof(key));
-  if (!key_write_ok || key_close_rc != 0)
+  if (!config_ok || close_rc != 0)
     {
       syslog(LOG_ERR, "[dm-voice] cannot write curl config\n");
       unlink(MIMO_CURL_CONFIG);
@@ -820,7 +839,7 @@ static int run_curl_command(const char *line)
     }
 
   errno = 0;
-  rc = system(line);
+  rc = system("curl -K " MIMO_CURL_CONFIG);
   saved_errno = errno;
   unlink(MIMO_CURL_CONFIG);
   if (rc != 0)
@@ -973,16 +992,18 @@ static int voice_wait_for_wifi(void)
 static int http_post_json(const char *path, const char *json_body,
                           const char *out_path)
 {
-  char cmd[1600];
-  char http_status[48] = "";
-  char curl_error[160] = "";
+  char url[160];
   FILE *f;
-  FILE *diag;
   size_t body_len;
   int write_ok;
   int close_rc;
-  int cmd_len;
+  int url_len;
   int rc;
+
+  if (!path || !json_body || !out_path)
+    {
+      return -1;
+    }
 
   if (!dm_wifi_connected())
     {
@@ -1019,43 +1040,16 @@ static int http_post_json(const char *path, const char *json_body,
       return -1;
     }
   unlink(out_path);
-  unlink(VOICE_HTTP_STATUS);
-  unlink(VOICE_CURL_ERROR);
-  /* Use board-supported curl options. The API key stays in a protected
-   * config file, not in the shell command. Double the percent so snprintf
-   * emits curl's literal %{http_code} template. */
-  cmd_len = snprintf(cmd, sizeof(cmd),
-                     "curl -K " MIMO_CURL_CONFIG " "
-                     "--cacert /resource/etc/ssl/curl/ca-certificates.crt "
-                     "-s -S -f -m 25 -w 'HTTP_STATUS:%%{http_code}\\n' "
-                     "-X POST %s%s -H 'Content-Type: application/json' "
-                     "-d @%s -o %s > %s 2> %s",
-                     VOICE_BASE, path, JSON_REQ, out_path,
-                     VOICE_HTTP_STATUS, VOICE_CURL_ERROR);
-  if (cmd_len <= 0 || cmd_len >= (int)sizeof(cmd))
+  url_len = snprintf(url, sizeof(url), "%s%s", VOICE_BASE, path);
+  if (url_len <= 0 || url_len >= (int)sizeof(url))
     {
       s_last_failure = DM_VOICE_FAILURE_CHAT;
-      syslog(LOG_ERR, "[dm-voice] HTTP command buffer is too small\n");
+      syslog(LOG_ERR, "[dm-voice] HTTP URL buffer is too small\n");
       return -1;
     }
-  rc = run_curl_command(cmd);
 
-  diag = fopen(VOICE_HTTP_STATUS, "r");
-  if (diag)
-    {
-      (void)fgets(http_status, sizeof(http_status), diag);
-      fclose(diag);
-      http_status[strcspn(http_status, "\r\n")] = '\0';
-    }
-  diag = fopen(VOICE_CURL_ERROR, "r");
-  if (diag)
-    {
-      (void)fgets(curl_error, sizeof(curl_error), diag);
-      fclose(diag);
-      curl_error[strcspn(curl_error, "\r\n")] = '\0';
-    }
-  unlink(VOICE_HTTP_STATUS);
-  unlink(VOICE_CURL_ERROR);
+  syslog(LOG_INFO, "[dm-voice] curl request configured; NSH argv kept minimal\n");
+  rc = run_curl_command(url, JSON_REQ, out_path, 25);
 
   if (rc != 0)
     {
@@ -1064,14 +1058,11 @@ static int http_post_json(const char *path, const char *json_body,
           s_last_failure = DM_VOICE_FAILURE_CHAT;
         }
       syslog(LOG_WARNING,
-             "[dm-voice] HTTP failure status=%s curl=%s\n",
-             http_status[0] ? http_status : "unavailable",
-             curl_error[0] ? curl_error : "no curl diagnostic");
+             "[dm-voice] HTTP request failed; curl error/status is above\n");
     }
   else
     {
-      syslog(LOG_INFO, "[dm-voice] HTTP success status=%s\n",
-             http_status[0] ? http_status : "unavailable");
+      syslog(LOG_INFO, "[dm-voice] HTTP request completed\n");
     }
   return rc;
 }

@@ -22,8 +22,6 @@
 #define MIMO_MODEL "mimo-v2.6-flash"
 #define CHAT_REQ_PATH "/tmp/dm_chat_req.json"
 #define CHAT_RSP_PATH "/tmp/dm_chat_rsp.json"
-#define CHAT_HTTP_STATUS "/tmp/dm_chat_http_status.txt"
-#define CHAT_CURL_ERROR "/tmp/dm_chat_curl_error.txt"
 #define CHAT_MAX_REPLY 240
 
 static int chat_key_load(char *key, size_t key_cap)
@@ -74,20 +72,27 @@ static int chat_key_load(char *key, size_t key_cap)
   return valid;
 }
 
-/* Invoke curl through NuttX system(). Restrictive permissions are attempted
- * when supported but must not block requests on filesystems without chmod. */
-static int run_curl_command(const char *line)
+/* Store every curl option in its config file. The NSH command is kept to two
+ * arguments (curl and -K config) because this image's argument limit is low. */
+static int run_curl_command(const char *url, const char *request_path,
+                            const char *out_path, int timeout_sec)
 {
   char key[128];
   FILE *kf;
-  int key_write_ok;
-  int key_close_rc;
+  int config_ok;
+  int close_rc;
   int rc;
   int saved_errno;
 
-  if (!line || !line[0] || !chat_key_load(key, sizeof(key)))
+  if (!url || !request_path || !out_path || timeout_sec < 1 ||
+      timeout_sec > 120 || strchr(url, '"') || strchr(url, '\\') ||
+      strchr(url, '\r') || strchr(url, '\n') || strchr(request_path, '"') ||
+      strchr(request_path, '\\') || strchr(request_path, '\r') ||
+      strchr(request_path, '\n') || strchr(out_path, '"') ||
+      strchr(out_path, '\\') || strchr(out_path, '\r') ||
+      strchr(out_path, '\n') || !chat_key_load(key, sizeof(key)))
     {
-      syslog(LOG_ERR, "[dm-chat] API key or curl command unavailable\n");
+      syslog(LOG_ERR, "[dm-chat] invalid curl request configuration\n");
       return -1;
     }
 
@@ -100,17 +105,29 @@ static int run_curl_command(const char *line)
     }
   if (chmod(MIMO_CURL_CONFIG, S_IRUSR | S_IWUSR) != 0)
     {
-      /* On this NuttX image chmod is not implemented. Continue with a
-       * short-lived config file; its key is never put on the command line. */
+      /* chmod is unsupported on this image; that must not block requests. */
       syslog(LOG_WARNING,
              "[dm-chat] chmod unavailable for curl config errno=%d; continuing\n",
              errno);
     }
-  key_write_ok = fprintf(kf, "header = \"Authorization: Bearer %s\"\n",
-                         key) > 0;
-  key_close_rc = fclose(kf);
+
+  config_ok = fputs("silent\nshow-error\nfail\n",
+                    kf) != EOF &&
+              fprintf(kf, "max-time = %d\n", timeout_sec) > 0 &&
+              fprintf(kf, "url = \"%s\"\n", url) > 0 &&
+              fputs("cacert = \"/resource/etc/ssl/curl/ca-certificates.crt\"\n"
+                    "request = \"POST\"\n"
+                    "header = \"Content-Type: application/json\"\n",
+                    kf) != EOF &&
+              fprintf(kf, "header = \"Authorization: Bearer %s\"\n",
+                      key) > 0 &&
+              fprintf(kf, "data = \"@%s\"\noutput = \"%s\"\n",
+                      request_path, out_path) > 0 &&
+              fputs("write-out = \"HTTP_STATUS:%{http_code}\\n\"\n",
+                    kf) != EOF;
+  close_rc = fclose(kf);
   memset(key, 0, sizeof(key));
-  if (!key_write_ok || key_close_rc != 0)
+  if (!config_ok || close_rc != 0)
     {
       syslog(LOG_ERR, "[dm-chat] cannot write curl config\n");
       unlink(MIMO_CURL_CONFIG);
@@ -118,7 +135,7 @@ static int run_curl_command(const char *line)
     }
 
   errno = 0;
-  rc = system(line);
+  rc = system("curl -K " MIMO_CURL_CONFIG);
   saved_errno = errno;
   unlink(MIMO_CURL_CONFIG);
   if (rc != 0)
@@ -129,25 +146,6 @@ static int run_curl_command(const char *line)
       return -1;
     }
   return 0;
-}
-
-static void chat_read_diag(const char *path, char *out, size_t out_size)
-{
-  FILE *f;
-
-  if (!out || out_size == 0)
-    {
-      return;
-    }
-  out[0] = '\0';
-  f = fopen(path, "r");
-  if (!f)
-    {
-      return;
-    }
-  (void)fgets(out, (int)out_size, f);
-  fclose(f);
-  out[strcspn(out, "\r\n")] = '\0';
 }
 
 static char s_last_reply[CHAT_MAX_REPLY];
@@ -431,13 +429,9 @@ const char *dm_chat_ai_ask(const char *user_text)
   char persona[1024];
   char hist[1400];
   char body[2400];
-  char cmd[1200];
-  char http_status[48] = "";
-  char curl_error[160] = "";
   const char *persona_src;
   FILE *f;
   int n;
-  int cmd_len;
   int write_ok;
   int close_rc;
   int curl_rc;
@@ -506,42 +500,18 @@ const char *dm_chat_ai_ask(const char *user_text)
     }
 
   unlink(CHAT_RSP_PATH);
-  unlink(CHAT_HTTP_STATUS);
-  unlink(CHAT_CURL_ERROR);
-  /* Emit a status line and curl stderr separately; neither contains the key
-   * or request body, and both let the user distinguish TLS/network/API errors. */
-  cmd_len = snprintf(cmd, sizeof(cmd),
-                     "curl -K " MIMO_CURL_CONFIG " "
-                     "--cacert /resource/etc/ssl/curl/ca-certificates.crt "
-                     "-s -S -f -m 20 -w 'HTTP_STATUS:%%{http_code}\\n' "
-                     "-X POST %s/chat/completions "
-                     "-H 'Content-Type: application/json' "
-                     "-d @%s -o %s > %s 2> %s",
-                     MIMO_BASE, CHAT_REQ_PATH, CHAT_RSP_PATH,
-                     CHAT_HTTP_STATUS, CHAT_CURL_ERROR);
-  if (cmd_len <= 0 || cmd_len >= (int)sizeof(cmd))
-    {
-      syslog(LOG_ERR, "[dm-chat] curl command buffer too small\n");
-      return local_reply(user_text);
-    }
-
-  curl_rc = run_curl_command(cmd);
-  chat_read_diag(CHAT_HTTP_STATUS, http_status, sizeof(http_status));
-  chat_read_diag(CHAT_CURL_ERROR, curl_error, sizeof(curl_error));
-  unlink(CHAT_HTTP_STATUS);
-  unlink(CHAT_CURL_ERROR);
+  curl_rc = run_curl_command(MIMO_BASE "/chat/completions",
+                             CHAT_REQ_PATH, CHAT_RSP_PATH, 20);
   if (curl_rc != 0)
     {
-      syslog(LOG_WARNING, "[dm-chat] HTTP failure status=%s curl=%s\n",
-             http_status[0] ? http_status : "unavailable",
-             curl_error[0] ? curl_error : "no curl diagnostic");
+      syslog(LOG_WARNING,
+             "[dm-chat] HTTP request failed; inspect curl output/status above\n");
       strncpy(s_last_reply, local_reply(user_text),
               sizeof(s_last_reply) - 1);
       s_last_reply[sizeof(s_last_reply) - 1] = '\0';
       return s_last_reply;
     }
-  syslog(LOG_INFO, "[dm-chat] HTTP success status=%s\n",
-         http_status[0] ? http_status : "unavailable");
+  syslog(LOG_INFO, "[dm-chat] HTTP request completed\n");
 
   extract_content(CHAT_RSP_PATH, s_last_reply, sizeof(s_last_reply));
   if (s_last_reply[0])
@@ -569,7 +539,6 @@ int dm_dict_ai_define(const char *word, char *out, int cap)
 {
   char esc[96];
   char body[700];
-  char cmd[1100];
   FILE *f;
   int n;
 
@@ -604,14 +573,8 @@ int dm_dict_ai_define(const char *word, char *out, int cap)
   fwrite(body, 1, (size_t)n, f);
   fclose(f);
   unlink(CHAT_RSP_PATH);
-  snprintf(cmd, sizeof(cmd),
-           "curl -K " MIMO_CURL_CONFIG " "
-           "--cacert /resource/etc/ssl/curl/ca-certificates.crt "
-           "-s -S -f -m 18 -X POST %s/chat/completions "
-           "-H 'Content-Type: application/json' "
-           "-d @%s -o %s",
-           MIMO_BASE, CHAT_REQ_PATH, CHAT_RSP_PATH);
-  if (run_curl_command(cmd) != 0)
+  if (run_curl_command(MIMO_BASE "/chat/completions", CHAT_REQ_PATH,
+                       CHAT_RSP_PATH, 18) != 0)
     {
       return -1;
     }
