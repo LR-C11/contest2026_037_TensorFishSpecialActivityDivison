@@ -17,6 +17,8 @@
 static lv_obj_t *s_pct;
 static lv_obj_t *s_hint;
 static lv_obj_t *s_slider;
+static lv_obj_t *s_alarm_slider;
+static lv_obj_t *s_alarm_label;
 static lv_obj_t *s_mute_btn;
 static lv_obj_t *s_out_name;
 static bool s_syncing;
@@ -34,8 +36,9 @@ static void *test_beep_worker(void *arg)
 
 static void refresh(void)
 {
-  char buf[32];
+  char buf[48];
   int v = dm_vol_get();
+  int alarm_v = dm_vol_alarm_get();
 
   snprintf(buf, sizeof(buf), "%d%%", v);
   if (s_pct)
@@ -63,6 +66,17 @@ static void refresh(void)
       lv_slider_set_value(s_slider, v, LV_ANIM_OFF);
       s_syncing = false;
     }
+  if (s_alarm_slider)
+    {
+      s_syncing = true;
+      lv_slider_set_value(s_alarm_slider, alarm_v, LV_ANIM_OFF);
+      s_syncing = false;
+    }
+  if (s_alarm_label)
+    {
+      snprintf(buf, sizeof(buf), "闹钟音量 %d%%（独立增强）", alarm_v);
+      lv_label_set_text(s_alarm_label, buf);
+    }
   if (s_mute_btn)
     {
       lv_obj_t *lab = lv_obj_get_child(s_mute_btn, 0);
@@ -82,6 +96,17 @@ static void slider_cb(lv_event_t *e)
       return;
     }
   (void)dm_vol_set((int)lv_slider_get_value(s_slider));
+  refresh();
+}
+
+static void alarm_slider_cb(lv_event_t *e)
+{
+  (void)e;
+  if (s_syncing || !s_alarm_slider)
+    {
+      return;
+    }
+  (void)dm_vol_alarm_set((int)lv_slider_get_value(s_alarm_slider));
   refresh();
 }
 
@@ -223,22 +248,21 @@ void dm_create_volume(void)
     lv_obj_set_pos(t, 58, 10);
   }
 
-  /* big percent */
-  s_pct = dm_lbl(page, "80%", "80%", g_dm_font_xl, MD_PRIMARY);
+  /* Main media volume */
+  s_pct = dm_lbl(page, "80%", "80%", g_dm_font_l, MD_PRIMARY);
   lv_obj_set_style_text_align(s_pct, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-  lv_obj_set_width(s_pct, 200);
-  lv_obj_set_pos(s_pct, 60, 40);
+  lv_obj_set_width(s_pct, 160);
+  lv_obj_set_pos(s_pct, 80, 34);
 
-  s_hint = dm_lbl(page, "拖动滑杆调音量", "Drag slider", g_dm_font_s,
+  s_hint = dm_lbl(page, "媒体音量", "Media volume", g_dm_font_s,
                   MD_ON_SURFACE_VARIANT);
   lv_obj_set_style_text_align(s_hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_set_width(s_hint, 280);
-  lv_obj_set_pos(s_hint, 20, 86);
+  lv_obj_set_pos(s_hint, 20, 60);
 
-  /* slider full width */
   s_slider = lv_slider_create(page);
-  lv_obj_set_size(s_slider, 280, 16);
-  lv_obj_set_pos(s_slider, 20, 110);
+  lv_obj_set_size(s_slider, 280, 12);
+  lv_obj_set_pos(s_slider, 20, 78);
   lv_slider_set_range(s_slider, 0, 100);
   lv_obj_set_style_bg_color(s_slider, lv_color_hex(MD_SURFACE_HIGHEST),
                             LV_PART_MAIN);
@@ -250,36 +274,48 @@ void dm_create_volume(void)
   lv_obj_add_event_cb(s_slider, slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
   /* -10 / +10 */
-  b = dm_btn(page, "−10", "-10", 80, 32, MD_SURFACE_HIGH, MD_ON_SURFACE,
+  b = dm_btn(page, "−10", "-10", 80, 26, MD_SURFACE_HIGH, MD_ON_SURFACE,
              btn_minus, NULL);
-  lv_obj_set_pos(b, 20, 138);
-  b = dm_btn(page, "＋10", "+10", 80, 32, MD_SURFACE_HIGH, MD_ON_SURFACE,
+  lv_obj_set_pos(b, 20, 96);
+  b = dm_btn(page, "＋10", "+10", 80, 26, MD_SURFACE_HIGH, MD_ON_SURFACE,
              btn_plus, NULL);
-  lv_obj_set_pos(b, 220, 138);
+  lv_obj_set_pos(b, 220, 96);
 
-  {
-    lv_obj_t *ol = dm_lbl(page, "输出", "Output", g_dm_font_s,
-                          MD_ON_SURFACE_VARIANT);
-    lv_obj_set_pos(ol, 110, 142);
-    s_out_name = dm_lbl(page, "自动", "Auto", g_dm_font_s, MD_PRIMARY);
-    lv_obj_set_pos(s_out_name, 160, 142);
-  }
-
-  /* output: 2 big buttons */
-  b = dm_btn(page, "自动", "Auto", 130, 34, MD_SECONDARY_CONTAINER,
+  s_out_name = dm_lbl(page, "自动", "Auto", g_dm_font_s, MD_PRIMARY);
+  lv_obj_set_style_text_align(s_out_name, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_width(s_out_name, 100);
+  lv_obj_set_pos(s_out_name, 110, 100);
+  b = dm_btn(page, "自动输出", "Auto", 130, 26, MD_SECONDARY_CONTAINER,
              MD_ON_SECONDARY_CONT, btn_out, (void *)(intptr_t)DM_OUT_AUTO);
-  lv_obj_set_pos(b, 30, 172);
-  b = dm_btn(page, "喇叭", "Speaker", 130, 34, MD_SECONDARY_CONTAINER,
+  lv_obj_set_pos(b, 20, 128);
+  b = dm_btn(page, "喇叭", "Speaker", 130, 26, MD_SECONDARY_CONTAINER,
              MD_ON_SECONDARY_CONT, btn_out, (void *)(intptr_t)DM_OUT_SPEAKER);
-  lv_obj_set_pos(b, 160, 172);
+  lv_obj_set_pos(b, 170, 128);
 
-  /* mute / test */
-  s_mute_btn = dm_btn(page, "静音", "Mute", 140, 36, MD_SURFACE_HIGH,
+  s_mute_btn = dm_btn(page, "静音", "Mute", 140, 28, MD_SURFACE_HIGH,
                       MD_ON_SURFACE, btn_mute, NULL);
-  lv_obj_set_pos(s_mute_btn, 20, 216);
-  b = dm_btn(page, "试听", "Test", 140, 36, MD_PRIMARY, MD_ON_PRIMARY,
+  lv_obj_set_pos(s_mute_btn, 20, 158);
+  b = dm_btn(page, "试听", "Test", 140, 28, MD_PRIMARY, MD_ON_PRIMARY,
              btn_test, NULL);
-  lv_obj_set_pos(b, 160, 216);
+  lv_obj_set_pos(b, 160, 158);
+
+  s_alarm_label = dm_lbl(page, "闹钟音量 100%（独立增强）", "Alarm 100% (boosted)",
+                         g_dm_font_s, MD_PRIMARY);
+  lv_obj_set_width(s_alarm_label, 300);
+  lv_obj_set_pos(s_alarm_label, 10, 190);
+  s_alarm_slider = lv_slider_create(page);
+  lv_obj_set_size(s_alarm_slider, 280, 12);
+  lv_obj_set_pos(s_alarm_slider, 20, 216);
+  lv_slider_set_range(s_alarm_slider, 0, 100);
+  lv_obj_set_style_bg_color(s_alarm_slider, lv_color_hex(MD_SURFACE_HIGHEST),
+                            LV_PART_MAIN);
+  lv_obj_set_style_bg_color(s_alarm_slider, lv_color_hex(MD_PRIMARY),
+                            LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(s_alarm_slider, lv_color_hex(MD_ON_PRIMARY),
+                            LV_PART_KNOB);
+  lv_obj_set_style_pad_all(s_alarm_slider, 7, LV_PART_KNOB);
+  lv_obj_add_event_cb(s_alarm_slider, alarm_slider_cb,
+                      LV_EVENT_VALUE_CHANGED, NULL);
 
   dm_vol_init();
   dm_out_init();

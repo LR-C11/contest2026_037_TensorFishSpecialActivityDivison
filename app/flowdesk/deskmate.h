@@ -102,6 +102,8 @@ typedef enum {
   PAGE_VOICE_SEL,
   PAGE_ABOUT,
   PAGE_RECORDER,
+  PAGE_TODO,
+  PAGE_ALARM,
   PAGE_COUNT
 } dm_page_t;
 
@@ -245,6 +247,14 @@ void dm_voice_sel_tick(void);
 void dm_create_about(void);
 void dm_create_recorder(void);
 void dm_recorder_tick(void);
+void dm_create_reminders(void);
+void dm_reminder_tick(void);
+int dm_todo_add_voice(const char *name, int delay_seconds);
+int dm_todo_add_at_voice(const char *name, int year, int month, int day,
+                         int hour, int minute);
+int dm_alarm_add_voice(const char *name, int year, int month, int day,
+                       int hour, int minute, int repeat_daily);
+int dm_alarm_add_after_voice(const char *name, int delay_seconds);
 void dm_voice_profile_init(void);
 void dm_proactive_tick(void);
 void dm_proactive_focus_done(int32_t minutes);

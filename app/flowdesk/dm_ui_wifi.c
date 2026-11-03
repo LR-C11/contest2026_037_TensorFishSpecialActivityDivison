@@ -1038,6 +1038,8 @@ void dm_create_settings(void)
 
   /* App Connect entry */
   lv_obj_t *c_app = card(sc, 56);
+  /* Temporarily hide App Connect without removing its implementation. */
+  lv_obj_add_flag(c_app, LV_OBJ_FLAG_HIDDEN);
   lv_obj_set_width(c_app, 288);
   lv_obj_add_flag(c_app, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(c_app, open_app_conn, LV_EVENT_CLICKED, NULL);

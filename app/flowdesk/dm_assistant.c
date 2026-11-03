@@ -16,6 +16,7 @@
 #define INTENT_REPLY_MAX 240
 #define INTENT_WAIT_STEPS 160
 #define INTENT_WAIT_US 50000
+#define ASSISTANT_TODO_MAX_SECONDS (7 * 24 * 60 * 60)
 
 typedef enum
 {
@@ -28,6 +29,10 @@ typedef enum
   INTENT_GAME_ASK,
   INTENT_GAME,
   INTENT_GAME_CANCEL,
+  INTENT_TODO_AFTER,
+  INTENT_TODO_AT,
+  INTENT_ALARM,
+  INTENT_ALARM_AFTER,
   INTENT_TIME_ERROR
 } assistant_intent_type_t;
 
@@ -35,6 +40,7 @@ typedef struct
 {
   assistant_intent_type_t type;
   int seconds;
+  int repeat_daily;
   dm_page_t game_page;
   int year;
   int month;
@@ -145,7 +151,7 @@ static int parse_number_slice(const char *text, size_t begin, size_t end,
       for (i = begin; i < end; i++)
         {
           int digit = text[i] - '0';
-          if (parsed > (10000 - digit) / 10)
+          if (parsed > (1000000 - digit) / 10)
             {
               return 0;
             }
@@ -188,7 +194,7 @@ static int parse_number_slice(const char *text, size_t begin, size_t end,
       section += number;
     }
   total += section;
-  if (total > 10000)
+  if (total > 1000000)
     {
       return 0;
     }
@@ -254,7 +260,8 @@ static const char *first_of(const char *text, const char *a, const char *b)
 
 static int parse_duration_part(const char *text, const char *unit,
                                int unit_bytes, int multiplier,
-                               int allow_half_hour, int *seconds)
+                               int allow_half_hour, int max_seconds,
+                               int *seconds)
 {
   size_t start;
   int number;
@@ -270,7 +277,8 @@ static int parse_duration_part(const char *text, const char *unit,
           parse_number_before(text, (size_t)(unit - text - 6), &start,
                               &number))
         {
-          if (number < 0 || number > 2)
+          if (number < 0 || number > max_seconds / multiplier ||
+              number * multiplier > max_seconds - 30 * 60)
             {
               return -1;
             }
@@ -297,8 +305,7 @@ static int parse_duration_part(const char *text, const char *unit,
           return -1;
         }
     }
-  if (number < 0 || number > 10000 ||
-      number > 7200 / multiplier)
+  if (number < 0 || number > max_seconds / multiplier)
     {
       return -1;
     }
@@ -306,7 +313,8 @@ static int parse_duration_part(const char *text, const char *unit,
   return 1;
 }
 
-static int parse_duration_seconds(const char *text, int *seconds)
+static int parse_duration_seconds(const char *text, int *seconds,
+                                  int max_seconds)
 {
   const char *hour_word = strstr(text, "小时");
   const char *minute_word = strstr(text, "分钟");
@@ -319,7 +327,8 @@ static int parse_duration_seconds(const char *text, int *seconds)
     {
       minute_word = strstr(text, "分");
     }
-  rc = parse_duration_part(text, hour_word, 6, 60 * 60, 1, &total);
+  rc = parse_duration_part(text, hour_word, 6, 60 * 60, 1,
+                           max_seconds, &total);
   if (rc < 0)
     {
       return 0;
@@ -342,25 +351,497 @@ static int parse_duration_seconds(const char *text, int *seconds)
   rc = parse_duration_part(text, minute_word,
                            minute_word && strstr(text, "分钟") == minute_word
                              ? 6 : 3,
-                           60, 0, &total);
+                           60, 0, max_seconds, &total);
   if (rc < 0)
     {
       return 0;
     }
   parts += rc;
 
-  rc = parse_duration_part(text, second_word, 3, 1, 0, &total);
+  rc = parse_duration_part(text, second_word, 3, 1, 0,
+                           max_seconds, &total);
   if (rc < 0)
     {
       return 0;
     }
   parts += rc;
 
-  if (parts == 0 || total < 1 || total > 120 * 60)
+  if (parts == 0 || total < 1 || total > max_seconds)
     {
       return 0;
     }
   *seconds = total;
+  return 1;
+}
+
+static int ascii_contains_ci(const char *text, const char *needle);
+static int parse_datetime(const char *text, int *year, int *month, int *day,
+                          int *hour, int *minute, size_t *date_start,
+                          size_t *date_end, size_t *time_start,
+                          size_t *time_end);
+
+static const char *relative_marker(const char *text, size_t *bytes)
+{
+  const char *p = strstr(text, "之后");
+  const char *q = strstr(text, "以后");
+  const char *r = strstr(text, "后");
+  const char *best = NULL;
+  *bytes = 0;
+  if (p) { best = p; *bytes = 6; }
+  if (q && (!best || q < best)) { best = q; *bytes = 6; }
+  if (r && (!best || r < best)) { best = r; *bytes = 3; }
+  return best;
+}
+
+static void clean_relative_name(const char *text, char *out, size_t cap)
+{
+  const char *marker;
+  const char *content;
+  size_t marker_bytes;
+  size_t len;
+  static const char *const prefixes[] = {
+    "提醒我", "提醒一下", "提醒", "叫醒我", "叫我", "帮我", "帮忙",
+    "安排我", "记得", "请", "在", "我", "一下"
+  };
+  size_t i;
+  if (!out || cap == 0)
+    {
+      return;
+    }
+  marker = relative_marker(text, &marker_bytes);
+  content = marker ? marker + marker_bytes : NULL;
+  if (!content)
+    {
+      snprintf(out, cap, "%s", "待办事项");
+      return;
+    }
+  while (*content == ' ' || *content == '\t' || *content == ',' || *content == ':')
+    {
+      content++;
+    }
+  while (strncmp(content, "，", 3) == 0 || strncmp(content, "：", 3) == 0 ||
+         strncmp(content, "、", 3) == 0)
+    {
+      content += 3;
+    }
+  while (*content)
+    {
+      int changed = 0;
+      for (i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+        {
+          size_t n = strlen(prefixes[i]);
+          if (strncmp(content, prefixes[i], n) == 0)
+            {
+              content += n;
+              changed = 1;
+              break;
+            }
+        }
+      if (!changed)
+        {
+          break;
+        }
+      while (*content == ' ' || *content == '\t' || *content == ',' || *content == ':')
+        {
+          content++;
+        }
+      while (strncmp(content, "，", 3) == 0 || strncmp(content, "：", 3) == 0 ||
+             strncmp(content, "、", 3) == 0)
+        {
+          content += 3;
+        }
+    }
+  len = strlen(content);
+  while (len > 0)
+    {
+      if (len >= 3 && (memcmp(content + len - 3, "。", 3) == 0 ||
+                       memcmp(content + len - 3, "，", 3) == 0 ||
+                       memcmp(content + len - 3, "！", 3) == 0 ||
+                       memcmp(content + len - 3, "？", 3) == 0))
+        {
+          len -= 3;
+        }
+      else if (content[len - 1] == ' ' || content[len - 1] == '\t' ||
+               content[len - 1] == ',' || content[len - 1] == '.')
+        {
+          len--;
+        }
+      else
+        {
+          break;
+        }
+    }
+  if (len == 0)
+    {
+      snprintf(out, cap, "%s", "待办事项");
+      return;
+    }
+  if (len >= cap)
+    {
+      len = cap - 1;
+      while (len > 0 && ((unsigned char)content[len] & 0xc0u) == 0x80u)
+        {
+          len--;
+        }
+    }
+  memcpy(out, content, len);
+  out[len] = '\0';
+}
+
+static int contains_alarm_word(const char *text)
+{
+  static const char *const words[] = {
+    "闹钟", "alarm", "起床", "叫醒", "叫我", "每天叫我", "每日闹钟"
+  };
+  return contains_any(text, words, sizeof(words) / sizeof(words[0])) ||
+         ascii_contains_ci(text, "alarm");
+}
+
+static void clean_alarm_name(const char *text, char *out, size_t cap)
+{
+  const char *time_mark = first_of(text, "点", "时");
+  const char *minute_mark;
+  const char *content;
+  size_t len;
+  static const char *const prefixes[] = {
+    "叫醒我", "叫我", "提醒我", "闹钟", "请", "帮我", "设置", "设个"
+  };
+  size_t i;
+  if (!time_mark)
+    {
+      snprintf(out, cap, "%s", "闹钟");
+      return;
+    }
+  content = time_mark + 3;
+  minute_mark = strstr(content, "分");
+  if (minute_mark)
+    {
+      content = minute_mark + 3;
+    }
+  else if (strncmp(content, "半", 3) == 0)
+    {
+      content += 3;
+    }
+  while (*content == ' ' || *content == '\t' || *content == ',' || *content == ':')
+    {
+      content++;
+    }
+  while (strncmp(content, "，", 3) == 0 || strncmp(content, "：", 3) == 0 ||
+         strncmp(content, "、", 3) == 0)
+    {
+      content += 3;
+    }
+  while (*content)
+    {
+      int changed = 0;
+      for (i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+        {
+          size_t n = strlen(prefixes[i]);
+          if (strncmp(content, prefixes[i], n) == 0)
+            {
+              content += n;
+              changed = 1;
+              break;
+            }
+        }
+      if (!changed) break;
+      while (*content == ' ' || *content == '\t' || *content == ',' || *content == ':')
+        {
+          content++;
+        }
+      while (strncmp(content, "，", 3) == 0 || strncmp(content, "：", 3) == 0 ||
+             strncmp(content, "、", 3) == 0)
+        {
+          content += 3;
+        }
+    }
+  len = strlen(content);
+  if (len == 0)
+    {
+      snprintf(out, cap, "%s", "闹钟");
+      return;
+    }
+  if (len >= cap)
+    {
+      len = cap - 1;
+      while (len > 0 && ((unsigned char)content[len] & 0xc0u) == 0x80u)
+        {
+          len--;
+        }
+    }
+  memcpy(out, content, len);
+  out[len] = '\0';
+}
+
+static int alarm_date_was_spoken(const char *text)
+{
+  const char *day_mark = first_of(text, "号", "日");
+  const char *month_mark = strstr(text, "月");
+  const char *year_mark = strstr(text, "年");
+  size_t start;
+  int value;
+
+  if (day_mark && parse_number_before(text, (size_t)(day_mark - text),
+                                      &start, &value))
+    {
+      return 1;
+    }
+  if (month_mark && parse_number_before(text, (size_t)(month_mark - text),
+                                        &start, &value))
+    {
+      return 1;
+    }
+  if (year_mark && parse_number_before(text, (size_t)(year_mark - text),
+                                       &start, &value))
+    {
+      return 1;
+    }
+  return 0;
+}
+
+static int parse_alarm_time(const char *text, assistant_intent_t *intent)
+{
+  size_t ds;
+  size_t de;
+  size_t ts;
+  size_t te;
+  const char *time_mark;
+  const char *minute_mark;
+  size_t hour_start;
+  int hour;
+  int minute = 0;
+  int day_offset = 0;
+  int next_day = 0;
+  int has_datetime;
+  time_t now;
+  struct tm current;
+  struct tm target;
+  struct tm verify;
+  time_t when;
+
+  has_datetime = parse_datetime(text, &intent->year, &intent->month, &intent->day,
+                                &intent->hour, &intent->minute, &ds, &de,
+                                &ts, &te);
+  if (has_datetime == 1)
+    {
+      const char *year_mark = strstr(text, "年");
+      int explicit_year = year_mark != NULL;
+      int explicit_month = strstr(text, "月") != NULL;
+      int repeat_daily = strstr(text, "每天") || strstr(text, "每日") ||
+                         strstr(text, "天天");
+      int target_day = intent->day;
+      int midnight_roll = 0;
+      int attempt;
+
+      if (explicit_year)
+        {
+          size_t year_start;
+          int year_value;
+          if (!parse_number_before(text, (size_t)(year_mark - text),
+                                   &year_start, &year_value) ||
+              year_value < 2024 || year_value > 2099)
+            {
+              return -2;
+            }
+          intent->year = year_value;
+        }
+      if ((strstr(text, "凌晨") || strstr(text, "早上") || strstr(text, "上午")) &&
+          intent->hour == 12)
+        {
+          intent->hour = 0;
+        }
+      else if ((strstr(text, "下午") || strstr(text, "晚上") ||
+                strstr(text, "傍晚") || strstr(text, "明晚")) &&
+               intent->hour < 12)
+        {
+          intent->hour += 12;
+        }
+      else if ((strstr(text, "晚上") || strstr(text, "明晚")) &&
+               intent->hour == 12)
+        {
+          intent->hour = 0;
+          midnight_roll = 1;
+        }
+
+      now = time(NULL);
+      if (!localtime_r(&now, &current) || current.tm_year + 1900 < 2024)
+        {
+          return -1;
+        }
+      if (!explicit_year)
+        {
+          intent->year = current.tm_year + 1900;
+        }
+      if (!explicit_month)
+        {
+          intent->month = current.tm_mon + 1;
+        }
+      for (attempt = 0; attempt < (explicit_year ? 1 : 13); attempt++)
+        {
+          memset(&target, 0, sizeof(target));
+          target.tm_year = intent->year - 1900;
+          target.tm_mon = intent->month - 1;
+          target.tm_mday = target_day;
+          target.tm_hour = 12;
+          target.tm_isdst = -1;
+          when = mktime(&target);
+          if (when != (time_t)-1)
+            {
+              localtime_r(&when, &verify);
+              if (verify.tm_year == intent->year - 1900 &&
+                  verify.tm_mon == intent->month - 1 && verify.tm_mday == target_day)
+                {
+                  if (midnight_roll)
+                    {
+                      verify.tm_mday++;
+                    }
+                  verify.tm_hour = intent->hour;
+                  verify.tm_min = intent->minute;
+                  verify.tm_sec = 0;
+                  verify.tm_isdst = -1;
+                  when = mktime(&verify);
+                  if (when != (time_t)-1 && when <= now && repeat_daily)
+                    {
+                      localtime_r(&when, &verify);
+                      verify.tm_mday++;
+                      verify.tm_hour = intent->hour;
+                      verify.tm_min = intent->minute;
+                      verify.tm_sec = 0;
+                      verify.tm_isdst = -1;
+                      when = mktime(&verify);
+                    }
+                  if (when != (time_t)-1)
+                    {
+                      localtime_r(&when, &target);
+                      if (target.tm_hour == intent->hour &&
+                          target.tm_min == intent->minute && when > now)
+                        {
+                          intent->year = target.tm_year + 1900;
+                          intent->month = target.tm_mon + 1;
+                          intent->day = target.tm_mday;
+                          break;
+                        }
+                    }
+                }
+            }
+          if (explicit_year)
+            {
+              return 0;
+            }
+          if (explicit_month)
+            {
+              intent->year++;
+            }
+          else
+            {
+              intent->month++;
+              if (intent->month > 12)
+                {
+                  intent->month = 1;
+                  intent->year++;
+                }
+            }
+        }
+      if (attempt >= (explicit_year ? 1 : 13))
+        {
+          return 0;
+        }
+      intent->repeat_daily = repeat_daily ? 1 : 0;
+      clean_alarm_name(text, intent->text, sizeof(intent->text));
+      return 1;
+    }
+  if (has_datetime < 0)
+    {
+      return -1;
+    }
+  if (alarm_date_was_spoken(text))
+    {
+      /* A spoken but invalid date must never silently become today's alarm. */
+      return -2;
+    }
+
+  time_mark = first_of(text, "点", "时");
+  if (!time_mark ||
+      !parse_number_before(text, (size_t)(time_mark - text), &hour_start, &hour) ||
+      hour < 0 || hour > 23)
+    {
+      return 0;
+    }
+  minute_mark = strstr(time_mark + 3, "分");
+  if (minute_mark)
+    {
+      size_t minute_start;
+      int parsed;
+      if (!parse_number_before(text, (size_t)(minute_mark - text), &minute_start,
+                               &parsed) ||
+          minute_start < (size_t)(time_mark + 3 - text) || parsed < 0 || parsed > 59)
+        {
+          return 0;
+        }
+      minute = parsed;
+    }
+  else if (strncmp(time_mark + 3, "半", 3) == 0)
+    {
+      minute = 30;
+    }
+
+  if ((strstr(text, "凌晨") || strstr(text, "早上") || strstr(text, "上午")) &&
+      hour == 12)
+    {
+      hour = 0;
+    }
+  else if ((strstr(text, "下午") || strstr(text, "晚上") ||
+            strstr(text, "傍晚") || strstr(text, "明晚")) && hour < 12)
+    {
+      hour += 12;
+    }
+
+  now = time(NULL);
+  if (!localtime_r(&now, &current) || current.tm_year + 1900 < 2024)
+    {
+      return -1;
+    }
+  if (strstr(text, "后天")) day_offset = 2;
+  else if (strstr(text, "明天") || strstr(text, "明早") ||
+           strstr(text, "明晚")) day_offset = 1;
+  if (strstr(text, "晚上") && hour == 12)
+    {
+      hour = 0;
+      next_day = 1;
+    }
+  else if (strstr(text, "夜里") && hour == 12)
+    {
+      hour = 0;
+      next_day = 1;
+    }
+  memset(&target, 0, sizeof(target));
+  target.tm_year = current.tm_year;
+  target.tm_mon = current.tm_mon;
+  target.tm_mday = current.tm_mday + day_offset + next_day;
+  target.tm_hour = hour;
+  target.tm_min = minute;
+  target.tm_isdst = -1;
+  when = mktime(&target);
+  if (when == (time_t)-1)
+    {
+      return 0;
+    }
+  if (day_offset == 0 && when <= now &&
+      !(strstr(text, "每天") || strstr(text, "每日") || strstr(text, "天天")))
+    {
+      target.tm_mday++;
+      target.tm_isdst = -1;
+      when = mktime(&target);
+    }
+  localtime_r(&when, &target);
+  intent->year = target.tm_year + 1900;
+  intent->month = target.tm_mon + 1;
+  intent->day = target.tm_mday;
+  intent->hour = hour;
+  intent->minute = minute;
+  intent->repeat_daily = strstr(text, "每天") || strstr(text, "每日") ||
+                         strstr(text, "天天") ? 1 : 0;
+  clean_alarm_name(text, intent->text, sizeof(intent->text));
   return 1;
 }
 
@@ -469,11 +950,14 @@ static int parse_datetime(const char *text, int *year, int *month, int *day,
     {
       return 0;
     }
-  if (month_mark && month_mark < day_mark &&
-      parse_number_before(text, (size_t)(month_mark - text), &month_start,
-                          &month_value) && month_value >= 1 &&
-      month_value <= 12)
+  if (month_mark && month_mark < day_mark)
     {
+      if (!parse_number_before(text, (size_t)(month_mark - text), &month_start,
+                               &month_value) || month_value < 1 ||
+          month_value > 12)
+        {
+          return 0;
+        }
       explicit_month = 1;
     }
   else
@@ -482,11 +966,14 @@ static int parse_datetime(const char *text, int *year, int *month, int *day,
     }
 
   year_mark = month_mark ? strstr(text, "年") : NULL;
-  if (year_mark && year_mark < month_mark &&
-      parse_number_before(text, (size_t)(year_mark - text), &year_start,
-                          &year_value) && year_value >= 2024 &&
-      year_value <= 2099)
+  if (year_mark && year_mark < month_mark)
     {
+      if (!parse_number_before(text, (size_t)(year_mark - text), &year_start,
+                               &year_value) || year_value < 2024 ||
+          year_value > 2099)
+        {
+          return 0;
+        }
       explicit_year = 1;
     }
   time_mark = first_of(day_mark + 3, "点", "时");
@@ -518,6 +1005,18 @@ static int parse_datetime(const char *text, int *year, int *month, int *day,
   else if (strncmp(time_mark + 3, "半", 3) == 0)
     {
       minute_value = 30;
+    }
+
+  /* Resolve spoken 12-hour markers before choosing a future calendar date. */
+  if ((strstr(text, "凌晨") || strstr(text, "早上") || strstr(text, "上午")) &&
+      hour_value == 12)
+    {
+      hour_value = 0;
+    }
+  else if ((strstr(text, "下午") || strstr(text, "晚上") ||
+            strstr(text, "傍晚") || strstr(text, "明晚")) && hour_value < 12)
+    {
+      hour_value += 12;
     }
 
   now = time(NULL);
@@ -656,6 +1155,31 @@ static void trim_reminder_clutter(char *text, size_t *len)
     }
 }
 
+static void clean_todo_at_name(const char *text, char *out, size_t cap)
+{
+  size_t len;
+
+  if (!out || cap == 0)
+    {
+      return;
+    }
+
+  clean_alarm_name(text, out, cap);
+  if (strcmp(out, "闹钟") == 0)
+    {
+      snprintf(out, cap, "%s", "待办事项");
+      return;
+    }
+
+  len = strlen(out);
+  trim_reminder_clutter(out, &len);
+  trim_reminder_punctuation(out, &len);
+  if (len == 0)
+    {
+      snprintf(out, cap, "%s", "待办事项");
+    }
+}
+
 static void clean_reminder_name(const char *text, size_t date_start,
                                 size_t date_end, size_t time_start,
                                 size_t time_end, char *out, size_t cap)
@@ -781,12 +1305,18 @@ static int parse_intent(const char *text, assistant_intent_t *intent)
   static const char *const no_focus[] = {
     "不要专注", "别专注", "不用专注", "取消专注", "不要计时", "别计时"
   };
+  static const char *const todo_triggers[] = {
+    "提醒", "待办", "记得", "到时候", "todo"
+  };
   size_t date_start = 0;
   size_t date_end = 0;
   size_t time_start = 0;
   size_t time_end = 0;
   int has_dt;
   int seconds;
+  int alarm_rc;
+  size_t relative_bytes;
+  int alarm_requested;
   dm_page_t game_page;
   int cancel_reminder;
   int cancel_focus;
@@ -800,6 +1330,73 @@ static int parse_intent(const char *text, assistant_intent_t *intent)
   has_dt = parse_datetime(text, &intent->year, &intent->month, &intent->day,
                           &intent->hour, &intent->minute, &date_start,
                           &date_end, &time_start, &time_end);
+  relative_marker(text, &relative_bytes);
+  alarm_requested = contains_alarm_word(text) ||
+      ((strstr(text, "每天") || strstr(text, "每日") || strstr(text, "天天")) &&
+       first_of(text, "点", "时") && !relative_bytes);
+  if (!cancel_reminder && alarm_requested)
+    {
+      relative_marker(text, &relative_bytes);
+      if (relative_bytes &&
+          parse_duration_seconds(text, &seconds, ASSISTANT_TODO_MAX_SECONDS))
+        {
+          intent->type = INTENT_ALARM_AFTER;
+          intent->seconds = seconds;
+          clean_relative_name(text, intent->text, sizeof(intent->text));
+          if (strcmp(intent->text, "待办事项") == 0)
+            {
+              snprintf(intent->text, sizeof(intent->text), "%s", "闹钟");
+            }
+          return 1;
+        }
+      alarm_rc = parse_alarm_time(text, intent);
+      if (alarm_rc > 0)
+        {
+          intent->type = INTENT_ALARM;
+          return 1;
+        }
+      if (alarm_rc < 0)
+        {
+          intent->type = INTENT_TIME_ERROR;
+          return 1;
+        }
+    }
+
+  if (!cancel_reminder && !alarm_requested && !cancel_focus &&
+      !(strstr(text, "专注") || strstr(text, "计时") || strstr(text, "番茄钟")) &&
+      contains_any(text, todo_triggers,
+                   sizeof(todo_triggers) / sizeof(todo_triggers[0])))
+    {
+      const char *clock_mark = first_of(text, "点", "时");
+      relative_marker(text, &relative_bytes);
+      if (relative_bytes &&
+          parse_duration_seconds(text, &seconds, ASSISTANT_TODO_MAX_SECONDS))
+        {
+          intent->type = INTENT_TODO_AFTER;
+          intent->seconds = seconds;
+          clean_relative_name(text, intent->text, sizeof(intent->text));
+          return 1;
+        }
+
+      /* A clock-only request such as "11点提醒我开会" is a timed TODO,
+       * not an alarm. Resolve it to the next occurrence of that local time. */
+      if (!relative_bytes && has_dt == 0 && clock_mark)
+        {
+          alarm_rc = parse_alarm_time(text, intent);
+          if (alarm_rc > 0)
+            {
+              intent->type = INTENT_TODO_AT;
+              clean_todo_at_name(text, intent->text, sizeof(intent->text));
+              return 1;
+            }
+          if (alarm_rc <= 0)
+            {
+              intent->type = INTENT_TIME_ERROR;
+              return 1;
+            }
+        }
+    }
+
   if (has_dt < 0 && !cancel_reminder &&
       contains_any(text, reminder_triggers,
                    sizeof(reminder_triggers) / sizeof(reminder_triggers[0])))
@@ -883,7 +1480,7 @@ static int parse_intent(const char *text, assistant_intent_t *intent)
 
   if (!cancel_focus &&
       (strstr(text, "专注") || strstr(text, "计时") || strstr(text, "番茄钟")) &&
-      parse_duration_seconds(text, &seconds))
+      parse_duration_seconds(text, &seconds, 120 * 60))
     {
       intent->type = INTENT_FOCUS;
       intent->seconds = seconds;
@@ -938,6 +1535,125 @@ static int run_intent(const assistant_intent_t *intent, char *reply, size_t cap)
             return 0;
           }
         snprintf(reply, cap, "已有专注计时正在进行，我没有重置它。先结束当前专注再试。");
+        return -1;
+
+      case INTENT_TODO_AFTER:
+        rc = dm_todo_add_voice(intent->text, intent->seconds);
+        if (rc == 0)
+          {
+            int hours = intent->seconds / 3600;
+            int minutes = (intent->seconds % 3600) / 60;
+            int seconds = intent->seconds % 60;
+            dm_show(PAGE_TODO);
+            if (hours > 0)
+              {
+                snprintf(reply, cap, "记好了：%s，%d小时%d分钟后提醒你，到时会语音播报。",
+                         intent->text, hours, minutes);
+              }
+            else if (minutes > 0 && seconds > 0)
+              {
+                snprintf(reply, cap, "记好了：%s，%d分钟%02d秒后语音提醒你。",
+                         intent->text, minutes, seconds);
+              }
+            else if (minutes > 0)
+              {
+                snprintf(reply, cap, "记好了：%s，%d分钟后语音提醒你。",
+                         intent->text, minutes);
+              }
+            else
+              {
+                snprintf(reply, cap, "记好了：%s，%d秒后语音提醒你。",
+                         intent->text, seconds);
+              }
+            return 0;
+          }
+        if (rc == -2)
+          {
+            snprintf(reply, cap, "待办列表已满，请先删除一项再添加。");
+          }
+        else if (rc == -4)
+          {
+            snprintf(reply, cap, "设备时间还没校准，暂时不能设定待办提醒。");
+          }
+        else
+          {
+            snprintf(reply, cap, "待办没有保存成功，请换一种说法再试。");
+          }
+        return -1;
+
+      case INTENT_TODO_AT:
+        rc = dm_todo_add_at_voice(intent->text, intent->year, intent->month,
+                                  intent->day, intent->hour, intent->minute);
+        if (rc == 0)
+          {
+            dm_show(PAGE_TODO);
+            snprintf(reply, cap, "记好了：%s，%d月%d日%02d:%02d提醒你。",
+                     intent->text, intent->month, intent->day, intent->hour,
+                     intent->minute);
+            return 0;
+          }
+        if (rc == -2)
+          {
+            snprintf(reply, cap, "待办列表已满，请先删除一项再添加。");
+          }
+        else if (rc == -4)
+          {
+            snprintf(reply, cap, "设备时间还没校准，暂时不能设定待办提醒。");
+          }
+        else
+          {
+            snprintf(reply, cap, "这个时间无效或已经过去，请说一个未来的时间。");
+          }
+        return -1;
+
+      case INTENT_ALARM:
+        rc = dm_alarm_add_voice(intent->text, intent->year, intent->month,
+                                intent->day, intent->hour, intent->minute,
+                                intent->repeat_daily);
+        if (rc == 0)
+          {
+            dm_show(PAGE_ALARM);
+            snprintf(reply, cap, "闹钟设好了：%s，%d月%d日%02d:%02d%s。",
+                     intent->text, intent->month, intent->day, intent->hour,
+                     intent->minute,
+                     intent->repeat_daily ? "，每天重复" : "，响一次");
+            return 0;
+          }
+        if (rc == -2)
+          {
+            snprintf(reply, cap, "闹钟数量已满，请先删除一个再添加。");
+          }
+        else if (rc == -4)
+          {
+            snprintf(reply, cap, "设备时间还没校准，暂时不能设闹钟。");
+          }
+        else
+          {
+            snprintf(reply, cap, "闹钟时间无效或已过，请换个时间再试。");
+          }
+        return -1;
+
+      case INTENT_ALARM_AFTER:
+        rc = dm_alarm_add_after_voice(intent->text, intent->seconds);
+        if (rc == 0)
+          {
+            dm_show(PAGE_ALARM);
+            snprintf(reply, cap, "闹钟已设好：%s，%d分钟后响铃。",
+                     intent->text, (intent->seconds + 59) / 60);
+            return 0;
+          }
+        if (rc == -2)
+          {
+            snprintf(reply, cap, "闹钟数量已满，请先删除一个再添加。");
+          }
+        else if (rc == -4)
+          {
+            snprintf(reply, cap, "设备时间还没校准，暂时不能设闹钟。");
+          }
+        else
+          {
+            snprintf(reply, cap, "闹钟没有保存成功，请再试一次。");
+          }
         return -1;
 
       case INTENT_WAKE:
@@ -1028,7 +1744,7 @@ static int run_intent(const assistant_intent_t *intent, char *reply, size_t cap)
         return 0;
 
       case INTENT_TIME_ERROR:
-        snprintf(reply, cap, "设备日期时间还没同步或校准，我没有创建提醒。请先在设置中校准时间后再试。");
+        snprintf(reply, cap, "设备时间未校准，或提醒时间无效；请检查日期时间后再试。");
         return -1;
 
       default:

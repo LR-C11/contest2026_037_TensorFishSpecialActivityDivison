@@ -111,6 +111,8 @@ void dm_create_features(void)
       PAGE_CONVERT },
     { "喝水提醒", "Water", "打卡 + 间隔提醒", "Drink + remind",
       PAGE_WATER },
+    { "待办提醒", "To-do", "语音添加，到时播报", "Voice add and speak when due", PAGE_TODO },
+    { "闹钟", "Alarm", "语音或手动设定", "Set by voice or manually", PAGE_ALARM },
     { "倒数日", "Countdown", "还剩多少天", "Days left", PAGE_COUNTDOWN },
     { "录音机", "Recorder", "录音保存并用喇叭回放", "Record and replay on speaker", PAGE_RECORDER },
     { "吃什么", "Eat", "随机帮你选一顿", "Random meal", PAGE_EAT },
@@ -204,13 +206,14 @@ void dm_dock_highlight(dm_page_t p)
            p == PAGE_WORD_QMODE || p == PAGE_WORD_QUIZ || p == PAGE_WORD_WRONG ||
            p == PAGE_WORD_LIST || p == PAGE_WORD_WSET || p == PAGE_CALC ||
            p == PAGE_SENSORS || p == PAGE_GUESS || p == PAGE_CONVERT ||
-           p == PAGE_WATER || p == PAGE_COUNTDOWN || p == PAGE_EAT ||
-           p == PAGE_24 || p == PAGE_DRAW || p == PAGE_BMI || p == PAGE_MED ||
+           p == PAGE_WATER || p == PAGE_TODO || p == PAGE_ALARM ||
+           p == PAGE_COUNTDOWN || p == PAGE_EAT || p == PAGE_24 ||
+           p == PAGE_DRAW || p == PAGE_BMI || p == PAGE_MED ||
            p == PAGE_MED_ADD || p == PAGE_MED_KB || p == PAGE_2048 ||
            p == PAGE_MBTI || p == PAGE_MBTI_Q || p == PAGE_MBTI_RESULT ||
            p == PAGE_NOTE_ADD || p == PAGE_NOTE_KB ||
            p == PAGE_DICT || p == PAGE_DICT_SEARCH || p == PAGE_DICT_DETAIL ||
-           p == PAGE_RECORDER)
+           p == PAGE_RECORDER || p == PAGE_TODO || p == PAGE_ALARM)
     {
       focus_key = PAGE_FEATURES;
     }
