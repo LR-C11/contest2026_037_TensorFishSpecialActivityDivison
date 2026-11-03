@@ -216,7 +216,8 @@ void dm_show(dm_page_t p)
           p == PAGE_MBTI || p == PAGE_MBTI_Q || p == PAGE_MBTI_RESULT ||
           p == PAGE_NOTE_ADD || p == PAGE_NOTE_KB ||
           p == PAGE_DICT || p == PAGE_DICT_SEARCH || p == PAGE_DICT_DETAIL ||
-          p == PAGE_RECORDER || p == PAGE_VOLUME ||
+          p == PAGE_RECORDER || p == PAGE_TODO || p == PAGE_ALARM ||
+          p == PAGE_VOLUME ||
           p == PAGE_VOICE_SEL ||
           p == PAGE_ABOUT)
         {
@@ -294,6 +295,7 @@ void dm_tick(void)
   dm_volume_tick();
   dm_voice_sel_tick();
   dm_recorder_tick();
+  dm_reminder_tick();
   dm_med_tick();
 }
 

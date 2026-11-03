@@ -46,6 +46,9 @@
   0xf3, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, \
   0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12
 
+#define DM_BLE_PAIR_TIMEOUT_TICKS 40 /* dm_ble_poll at 250 ms = 10 seconds */
+#define DM_BLE_START_TIMEOUT_TICKS (30 * DM_TICKS_PER_SEC)
+
 static const bt_uuid_t k_svc_uuid = BT_UUID_DECLARE_128(DM_UUID_SVC);
 
 enum {
@@ -67,13 +70,20 @@ static dm_ble_state_cb_t s_state_cb;
 
 static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 static bt_address_t s_peer;
+static bt_address_t s_paired_peer;
 static volatile int s_has_peer;
+static volatile int s_has_paired_peer;
 static volatile int s_auth_cccd;
 static volatile int s_cmd_cccd;
 static volatile int s_status_cccd;
 static volatile uint32_t s_challenge;
 static volatile int s_paired;
 static volatile int s_pairing;
+static volatile int s_pair_ticks;
+static volatile int s_start_pending;
+static volatile int s_start_ticks;
+static volatile int s_gatt_ready;
+static volatile int s_adv_restart_pending;
 
 static void set_state(dm_ble_state_t st)
 {
@@ -95,18 +105,36 @@ dm_ble_state_t dm_ble_state(void)
 
 bool dm_ble_is_paired(void)
 {
-  return s_paired ? true : false;
+  bool paired;
+  pthread_mutex_lock(&s_lock);
+  paired = s_paired ? true : false;
+  pthread_mutex_unlock(&s_lock);
+  return paired;
 }
 
 int dm_ble_paired_addr(char *buf, int buflen)
 {
-  if (!buf || buflen < 18 || !s_has_peer)
+  bt_address_t paired_peer;
+  int has_paired_peer;
+
+  if (!buf || buflen < 18)
+    {
+      return -1;
+    }
+  pthread_mutex_lock(&s_lock);
+  has_paired_peer = s_has_paired_peer;
+  if (has_paired_peer)
+    {
+      paired_peer = s_paired_peer;
+    }
+  pthread_mutex_unlock(&s_lock);
+  if (!has_paired_peer)
     {
       return -1;
     }
   snprintf(buf, buflen, "%02x:%02x:%02x:%02x:%02x:%02x",
-           s_peer.addr[5], s_peer.addr[4], s_peer.addr[3],
-           s_peer.addr[2], s_peer.addr[1], s_peer.addr[0]);
+           paired_peer.addr[5], paired_peer.addr[4], paired_peer.addr[3],
+           paired_peer.addr[2], paired_peer.addr[1], paired_peer.addr[0]);
   return 0;
 }
 
@@ -145,11 +173,16 @@ static uint32_t key_hash(void)
 static int send_notify(uint16_t attr, const uint8_t *data, uint16_t len)
 {
   bt_status_t ret;
-  if (!s_srv || !s_has_peer)
+  if (!s_srv)
     {
       return -1;
     }
   pthread_mutex_lock(&s_lock);
+  if (!s_has_peer)
+    {
+      pthread_mutex_unlock(&s_lock);
+      return -1;
+    }
   ret = bt_gatts_notify(s_srv, &s_peer, attr, (uint8_t *)data, len);
   pthread_mutex_unlock(&s_lock);
   return (ret == BT_STATUS_SUCCESS) ? 0 : -1;
@@ -170,12 +203,22 @@ static int send_pair_fail(void)
   return send_notify(ATTR_AUTH, buf, 2);
 }
 
+static int send_pair_confirm(void)
+{
+  uint8_t buf[2] = { DM_BT_CMD_PAIR_ACK, 0 };
+  return send_notify(ATTR_AUTH, buf, 2);
+}
+
 static void start_pairing(void)
 {
   uint32_t ch = (uint32_t)rand() ^ (uint32_t)(uintptr_t)&s_challenge;
+
+  pthread_mutex_lock(&s_lock);
   s_challenge = ch;
+  s_pair_ticks = 0;
   s_pairing = 1;
   s_paired = 0;
+  pthread_mutex_unlock(&s_lock);
   set_state(DM_BLE_PAIRING);
   if (send_pair_req(ch) != 0)
     {
@@ -208,32 +251,39 @@ static uint16_t auth_on_write(void *srv, bt_address_t *addr, uint16_t attr,
       length >= 6)
     {
       uint32_t resp = get_u32_le(value + 2);
-      uint32_t expect = s_challenge ^ key_hash();
+      uint32_t expect;
+      int accepted;
+
+      pthread_mutex_lock(&s_lock);
+      expect = s_challenge ^ key_hash();
+      accepted = s_pairing && resp == expect;
+      s_pair_ticks = 0;
+      s_challenge = 0;
+      s_pairing = 0;
+      s_paired = accepted;
+      if (accepted && addr)
+        {
+          s_peer = *addr;
+          s_paired_peer = *addr;
+          s_has_peer = 1;
+          s_has_paired_peer = 1;
+        }
+      pthread_mutex_unlock(&s_lock);
+
       syslog(LOG_INFO, "[ble-gatt] pair ack resp=0x%x expect=0x%x\n",
              (unsigned)resp, (unsigned)expect);
-      if (s_pairing && resp == expect)
+      if (accepted)
         {
-          s_paired = 1;
-          s_pairing = 0;
-          pthread_mutex_lock(&s_lock);
-          if (addr)
-            {
-              s_peer = *addr;
-              s_has_peer = 1;
-            }
-          pthread_mutex_unlock(&s_lock);
           set_state(DM_BLE_PAIRED);
-          /* confirm with Pair ACK notify so App side is consistent */
-          {
-            uint8_t ack[2] = { DM_BT_CMD_PAIR_ACK, 0 };
-            send_notify(ATTR_AUTH, ack, 2);
-          }
+          /* Confirm the application-level pairing, not just the ATT write. */
+          if (send_pair_confirm() != 0)
+            {
+              syslog(LOG_WARNING, "[ble-gatt] pair confirmation notify failed\n");
+            }
         }
       else
         {
-          s_paired = 0;
-          s_pairing = 0;
-          send_pair_fail();
+          (void)send_pair_fail();
           set_state(DM_BLE_CONNECTED);
         }
       return length;
@@ -306,19 +356,40 @@ static uint16_t cccd_on_write(void *srv, bt_address_t *addr, uint16_t attr,
     }
   if (attr == ATTR_AUTH_CCCD)
     {
+      int notify_enabled = value[0] != 0;
+      int paired;
+      pthread_mutex_lock(&s_lock);
       s_auth_cccd = value[0];
-      if (s_auth_cccd && !s_paired)
+      paired = s_paired;
+      pthread_mutex_unlock(&s_lock);
+      if (notify_enabled)
         {
-          start_pairing();
+          if (paired)
+            {
+              /* Restore the App state after reconnecting to a known peer. */
+              if (send_pair_confirm() != 0)
+                {
+                  syslog(LOG_WARNING,
+                         "[ble-gatt] reconnect pair confirmation failed\n");
+                }
+            }
+          else
+            {
+              start_pairing();
+            }
         }
     }
   else if (attr == ATTR_CMD_CCCD)
     {
+      pthread_mutex_lock(&s_lock);
       s_cmd_cccd = value[0];
+      pthread_mutex_unlock(&s_lock);
     }
   else if (attr == ATTR_STATUS_CCCD)
     {
+      pthread_mutex_lock(&s_lock);
       s_status_cccd = value[0];
+      pthread_mutex_unlock(&s_lock);
     }
   return length;
 }
@@ -349,40 +420,65 @@ static gatt_srv_db_t s_srv_db = {
 /* ---- gatts callbacks ---- */
 
 static int start_adv(void);
+static void stop_adv(void);
 
 static void on_connected(void *srv, bt_address_t *addr)
 {
+  int paired_peer = 0;
   (void)srv;
+  pthread_mutex_lock(&s_lock);
   if (addr)
     {
-      pthread_mutex_lock(&s_lock);
       s_peer = *addr;
       s_has_peer = 1;
-      pthread_mutex_unlock(&s_lock);
+      paired_peer = s_has_paired_peer &&
+                    memcmp(addr->addr, s_paired_peer.addr,
+                           sizeof(addr->addr)) == 0;
+      s_paired = paired_peer;
     }
-  syslog(LOG_INFO, "[ble-gatt] connected\n");
-  if (!s_paired)
+  else
     {
-      set_state(DM_BLE_CONNECTED);
+      s_paired = 0;
     }
+  pthread_mutex_unlock(&s_lock);
+  s_start_pending = 0;
+  s_start_ticks = 0;
+  s_adv_restart_pending = 0;
+  syslog(LOG_INFO, "[ble-gatt] connected\n");
+  set_state(paired_peer ? DM_BLE_PAIRED : DM_BLE_CONNECTED);
 }
 
 static void on_disconnected(void *srv, bt_address_t *addr)
 {
+  int paired;
   (void)srv;
   (void)addr;
   syslog(LOG_INFO, "[ble-gatt] disconnected\n");
+  pthread_mutex_lock(&s_lock);
   s_has_peer = 0;
   s_auth_cccd = 0;
   s_cmd_cccd = 0;
   s_status_cccd = 0;
   s_pairing = 0;
+  s_pair_ticks = 0;
   s_challenge = 0;
-  /* keep s_paired/s_peer so a reconnect does not need re-pairing;
+  paired = s_paired;
+  pthread_mutex_unlock(&s_lock);
+  /* keep the remembered peer so it can be recognized on reconnect;
      an explicit PAIR_REQ from a new device restarts pairing */
-  if (s_adv)
+  if (s_srv && s_gatt_ready)
     {
-      set_state(s_paired ? DM_BLE_PAIRED : DM_BLE_ADVERTISING);
+      /* Re-arm connectable advertising after the central disconnects. Defer
+       * the stack call to the app poll thread rather than this callback. */
+      s_start_pending = 1;
+      s_start_ticks = 0;
+      s_adv_restart_pending = 1;
+      set_state(DM_BLE_STARTING);
+    }
+  else if (s_adv)
+    {
+      s_adv_restart_pending = 0;
+      set_state(paired ? DM_BLE_PAIRED : DM_BLE_ADVERTISING);
     }
   else
     {
@@ -393,18 +489,33 @@ static void on_disconnected(void *srv, bt_address_t *addr)
 static void on_attr_table_added(void *srv, gatt_status_t status,
                                 uint16_t attr)
 {
-  (void)srv;
+  if (srv != s_srv)
+    {
+      syslog(LOG_WARNING, "[ble-gatt] ignore stale attr-table callback\n");
+      return;
+    }
+
   syslog(LOG_INFO, "[ble-gatt] attr table added handle=%u status=%d\n",
          (unsigned)attr, (int)status);
   if (status == GATT_STATUS_SUCCESS)
     {
-      /* advertise only after the GATT table is really ready, otherwise a
-         fast central connects and discovers an empty service */
-      (void)start_adv();
+      s_gatt_ready = 1;
+      /* Start advertising only after this service's table is confirmed. */
+      if (s_state == DM_BLE_STARTING && start_adv() != 0)
+        {
+          s_start_pending = 0;
+          s_start_ticks = 0;
+          set_state(DM_BLE_ERROR);
+        }
     }
   else
     {
+      syslog(LOG_ERR, "[ble-gatt] attribute table registration failed\n");
+      s_gatt_ready = 0;
+      s_start_pending = 0;
+      s_start_ticks = 0;
       set_state(DM_BLE_ERROR);
+      stop_adv();
     }
 }
 
@@ -481,19 +592,45 @@ static gatts_callbacks_t s_gatts_cbs = {
 
 static void on_adv_start(bt_advertiser_t *adv, uint8_t adv_id, uint8_t status)
 {
-  (void)adv;
+  if (adv != s_adv)
+    {
+      syslog(LOG_WARNING, "[ble-gatt] ignore stale advertising callback\n");
+      return;
+    }
+
   syslog(LOG_INFO, "[ble-gatt] adv start id=%u status=%u\n",
          (unsigned)adv_id, (unsigned)status);
-  if (status == 0)
+  if (s_state == DM_BLE_STARTING && status == 0)
     {
+      s_start_pending = 0;
+      s_start_ticks = 0;
+      s_adv_restart_pending = 0;
       set_state(DM_BLE_ADVERTISING);
+    }
+  else if (s_state == DM_BLE_STARTING && status != 0)
+    {
+      /* The framework frees the advertiser after a failed start callback. */
+      s_adv = NULL;
+      s_start_pending = 0;
+      s_start_ticks = 0;
+      syslog(LOG_ERR, "[ble-gatt] controller rejected advertising status=%u\n",
+             (unsigned)status);
+      set_state(DM_BLE_ERROR);
     }
 }
 
 static void on_adv_stop(bt_advertiser_t *adv, uint8_t adv_id)
 {
-  (void)adv;
-  (void)adv_id;
+  syslog(LOG_INFO, "[ble-gatt] advertising stopped id=%u\n",
+         (unsigned)adv_id);
+  if (adv == s_adv)
+    {
+      s_adv = NULL;
+      if (s_state == DM_BLE_ADVERTISING)
+        {
+          s_adv_restart_pending = 1;
+        }
+    }
 }
 
 static advertiser_callback_t s_adv_cbs = {
@@ -569,7 +706,7 @@ static int start_adv(void)
       set_state(DM_BLE_ERROR);
       return -1;
     }
-  set_state(DM_BLE_ADVERTISING);
+  /* Wait for on_adv_start() to confirm that the controller is advertising. */
   return 0;
 }
 
@@ -584,60 +721,184 @@ static void stop_adv(void)
 
 /* ---- adapter ---- */
 
-static volatile int s_start_pending;
+static int adapter_le_ready(void)
+{
+  bt_adapter_state_t state;
+
+  if (!s_ins)
+    {
+      return 0;
+    }
+
+  state = bt_adapter_get_state(s_ins);
+  return state == BT_ADAPTER_STATE_BLE_ON || state == BT_ADAPTER_STATE_ON;
+}
 
 static void do_register_and_adv(void)
 {
-  if (!s_srv)
+  bt_status_t ret;
+
+  if (s_srv)
     {
-      bt_status_t ret = bt_gatts_register_service(s_ins, &s_srv,
-                                                 &s_gatts_cbs);
-      if (ret != BT_STATUS_SUCCESS || !s_srv)
+      if (s_gatt_ready && !s_adv && start_adv() != 0)
         {
-          syslog(LOG_ERR, "[ble-gatt] register service fail %d\n", (int)ret);
-          s_srv = NULL;
-          return;
+          s_start_pending = 0;
+          s_start_ticks = 0;
+          set_state(DM_BLE_ERROR);
         }
-      /* start_adv() also fires from on_attr_table_added when ready */
-      bt_gatts_add_attr_table(s_srv, &s_srv_db);
+      /* Otherwise an attribute-table callback is pending for this service. */
+      return;
     }
-  (void)start_adv();
+
+  s_gatt_ready = 0;
+  ret = bt_gatts_register_service(s_ins, &s_srv, &s_gatts_cbs);
+  if (ret != BT_STATUS_SUCCESS || !s_srv)
+    {
+      syslog(LOG_ERR, "[ble-gatt] register service fail %d\n", (int)ret);
+      s_srv = NULL;
+      return;
+    }
+
+  ret = bt_gatts_add_attr_table(s_srv, &s_srv_db);
+  if (ret != BT_STATUS_SUCCESS)
+    {
+      syslog(LOG_ERR, "[ble-gatt] add attr table request failed %d\n",
+             (int)ret);
+      s_gatt_ready = 0;
+      s_start_pending = 0;
+      s_start_ticks = 0;
+      set_state(DM_BLE_ERROR);
+      (void)bt_gatts_unregister_service(s_srv);
+      s_srv = NULL;
+      return;
+    }
+
+  /* The callback is the single gate for advertising. */
+  s_start_pending = 0;
 }
 
-/* Called from the UI tick.  Registration/adv is deferred here instead of
-   running inside the adapter callback: doing it while the stack is still
-   in HCI init raced zblue into a kernel oops and no advertisement ever
-   started.  Keeps retrying every ~2s while starting. */
+/* Called from the UI tick. Registration is deferred until BLE reports ready
+   (BLE_ON or ON). Advertising begins only after this service's attribute-table
+   callback succeeds. A deadline prevents a failed HCI bring-up from leaving
+   the app page in STARTING forever. */
 void dm_ble_poll(void)
 {
   static int ticks;
+  int pairing_timed_out = 0;
+  bt_adapter_state_t adapter_state;
+
+  pthread_mutex_lock(&s_lock);
+  if (s_pairing)
+    {
+      if (++s_pair_ticks >= DM_BLE_PAIR_TIMEOUT_TICKS)
+        {
+          s_pairing = 0;
+          s_paired = 0;
+          s_pair_ticks = 0;
+          s_challenge = 0;
+          pairing_timed_out = 1;
+        }
+    }
+  else
+    {
+      s_pair_ticks = 0;
+    }
+  pthread_mutex_unlock(&s_lock);
+
+  adapter_state = s_ins ? bt_adapter_get_state(s_ins) : BT_ADAPTER_STATE_OFF;
+  if (pairing_timed_out)
+    {
+      syslog(LOG_WARNING, "[ble-gatt] pairing challenge timed out\n");
+      (void)send_pair_fail();
+      set_state(DM_BLE_CONNECTED);
+    }
+
+  if (s_state == DM_BLE_ADVERTISING && s_adv_restart_pending &&
+      s_gatt_ready && !s_adv)
+    {
+      s_start_pending = 1;
+      s_start_ticks = 0;
+      set_state(DM_BLE_STARTING);
+    }
+  if (s_state == DM_BLE_STARTING && s_adv_restart_pending && s_gatt_ready)
+    {
+      s_adv_restart_pending = 0;
+      stop_adv();
+    }
+
+  if (s_state == DM_BLE_STARTING)
+    {
+      /* Recover if the stack was already ready before callback registration,
+         or if the transition notification was dropped. */
+      if (adapter_le_ready())
+        {
+          s_start_pending = 1;
+        }
+      if (++s_start_ticks >= DM_BLE_START_TIMEOUT_TICKS)
+        {
+          s_start_ticks = 0;
+          s_start_pending = 0;
+          s_adv_restart_pending = 0;
+          ticks = 0;
+          syslog(LOG_ERR,
+                 "[ble-gatt] startup timeout state=%d: adapter did not reach advertising\n",
+                 (int)adapter_state);
+          set_state(DM_BLE_ERROR);
+          stop_adv();
+          if (s_srv)
+            {
+              (void)bt_gatts_unregister_service(s_srv);
+              s_srv = NULL;
+            }
+          s_gatt_ready = 0;
+          return;
+        }
+    }
+  else
+    {
+      s_start_ticks = 0;
+    }
 
   if (!s_start_pending || s_state != DM_BLE_STARTING)
     {
       ticks = 0;
       return;
     }
-  if (++ticks < 8) /* ~2s settle for zblue HCI init */
+  if (++ticks < 8) /* ~2s settle after BLE_ON/ON callback */
     {
       return;
     }
   ticks = 0;
-  if (!s_ins || bt_adapter_get_state(s_ins) != BT_ADAPTER_STATE_ON)
+  if (!adapter_le_ready())
     {
+      s_start_pending = 0;
       return;
     }
   do_register_and_adv();
-  if (s_adv)
+}
+
+static const char *adapter_state_name(bt_adapter_state_t state)
+{
+  switch (state)
     {
-      s_start_pending = 0;
+      case BT_ADAPTER_STATE_OFF: return "OFF";
+      case BT_ADAPTER_STATE_BLE_TURNING_ON: return "BLE_TURNING_ON";
+      case BT_ADAPTER_STATE_BLE_ON: return "BLE_ON";
+      case BT_ADAPTER_STATE_TURNING_ON: return "TURNING_ON";
+      case BT_ADAPTER_STATE_ON: return "ON";
+      case BT_ADAPTER_STATE_TURNING_OFF: return "TURNING_OFF";
+      case BT_ADAPTER_STATE_BLE_TURNING_OFF: return "BLE_TURNING_OFF";
+      default: return "UNKNOWN";
     }
 }
 
 static void adapter_state_cb(void *cookie, bt_adapter_state_t state)
 {
   (void)cookie;
-  syslog(LOG_INFO, "[ble-gatt] adapter state=%d\n", (int)state);
-  if (state == BT_ADAPTER_STATE_ON)
+  syslog(LOG_INFO, "[ble-gatt] adapter state=%d (%s)\n", (int)state,
+         adapter_state_name(state));
+  if ((state == BT_ADAPTER_STATE_BLE_ON || state == BT_ADAPTER_STATE_ON) &&
+      s_state == DM_BLE_STARTING)
     {
       s_start_pending = 1;
     }
@@ -649,15 +910,34 @@ static adapter_callbacks_t s_adapter_cbs = {
 
 int dm_ble_start(void)
 {
+  bt_status_t ret;
+
   if (s_state != DM_BLE_IDLE && s_state != DM_BLE_ERROR)
     {
       return 0;
     }
 
+  if (s_state == DM_BLE_ERROR)
+    {
+      stop_adv();
+      if (s_srv)
+        {
+          (void)bt_gatts_unregister_service(s_srv);
+          s_srv = NULL;
+        }
+    }
+  s_start_pending = 0;
+  s_start_ticks = 0;
+  s_adv_restart_pending = 0;
+  s_gatt_ready = 0;
   set_state(DM_BLE_STARTING);
+  pthread_mutex_lock(&s_lock);
   s_paired = 0;
   s_pairing = 0;
+  s_pair_ticks = 0;
+  s_challenge = 0;
   s_has_peer = 0;
+  pthread_mutex_unlock(&s_lock);
   srand((unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)s_ins);
 
   if (!s_ins)
@@ -674,39 +954,57 @@ int dm_ble_start(void)
   if (!s_adapter_cb)
     {
       s_adapter_cb = bt_adapter_register_callback(s_ins, &s_adapter_cbs);
+      if (!s_adapter_cb)
+        {
+          /* dm_ble_poll() also checks readiness, so an already-ready adapter
+             can still proceed without callback delivery. */
+          syslog(LOG_WARNING, "[ble-gatt] adapter callback registration failed; polling state\n");
+        }
     }
 
-  if (bt_adapter_enable(s_ins) != BT_STATUS_SUCCESS)
+  /* GATT is LE-only; do not bring up the unrelated BR/EDR profile stack. */
+  ret = bt_adapter_enable_le(s_ins);
+  if (ret != BT_STATUS_SUCCESS && !adapter_le_ready())
     {
-      /* may already be on — verify before registering */
-      if (bt_adapter_get_state(s_ins) == BT_ADAPTER_STATE_ON)
-        {
-          adapter_state_cb(NULL, BT_ADAPTER_STATE_ON);
-        }
-      else
-        {
-          syslog(LOG_ERR, "[ble-gatt] adapter enable fail\n");
-          set_state(DM_BLE_ERROR);
-          return -1;
-        }
+      syslog(LOG_ERR, "[ble-gatt] BLE adapter enable fail %d\n", (int)ret);
+      set_state(DM_BLE_ERROR);
+      return -1;
+    }
+
+  /* Covers an already-ready adapter even if no transition callback is emitted. */
+  if (adapter_le_ready())
+    {
+      bt_adapter_state_t state = bt_adapter_get_state(s_ins);
+      adapter_state_cb(NULL, state);
     }
   return 0;
 }
 
 void dm_ble_stop(void)
 {
+  s_start_pending = 0;
+  s_start_ticks = 0;
+  s_adv_restart_pending = 0;
+  s_gatt_ready = 0;
+  set_state(DM_BLE_IDLE);
   stop_adv();
   if (s_srv)
     {
       bt_gatts_unregister_service(s_srv);
       s_srv = NULL;
     }
+  pthread_mutex_lock(&s_lock);
   s_paired = 0;
   s_pairing = 0;
+  s_pair_ticks = 0;
+  s_challenge = 0;
   s_has_peer = 0;
+  s_has_paired_peer = 0;
+  memset(&s_paired_peer, 0, sizeof(s_paired_peer));
   s_auth_cccd = 0;
-  s_start_pending = 0;
-  set_state(DM_BLE_IDLE);
+  s_cmd_cccd = 0;
+  s_status_cccd = 0;
+  pthread_mutex_unlock(&s_lock);
 }
 
 #endif /* CONFIG_DESKMATE_APP */

@@ -15,7 +15,7 @@
 - 链路：`/dev/audio/pcm0c` → ASR `mimo-v2.5-asr` → LLM `mimo-v2.6-flash` → TTS `mimo-v2.5-tts` → 喇叭
 - 云端：`https://token-plan-ams.xiaomimimo.com/v1/chat/completions`
 - ASR / LLM / TTS 都走 Chat Completions；冰糖、茉莉、苏打试听样本预置在 `/resource/audio/`，可离线试听；其他云端音色首用时在线生成并缓存到 `/data`。
-- 本地语音意图：在聊天页点语音录音后说“计时20分钟”或“专注20分钟01秒”会直接启动对应时长；说“你好 openvela / hello openvela”会进入聊天、显示问候，并依次播报冰糖/茉莉/苏打三段预置语音（各音色单独试听逻辑不变）；说想玩小游戏会先询问类型，选择 2048、猜数字或 24 点后进入对应页面；带日期和时刻的提醒会保存到倒数日并到时弹窗/提示音；“记一下……”会保存到备忘；表达不开心时，以健康页今日记录提供非诊断性建议，不把健康记录发送给云端。
+- 本地语音意图：在聊天页点语音录音后说“计时20分钟”或“专注20分钟01秒”会直接启动对应时长；说“你好 openvela / hello openvela”会进入聊天、显示问候，并依次播报冰糖/茉莉/苏打三段预置语音（各音色单独试听逻辑不变）；说想玩小游戏会先询问类型，选择 2048、猜数字或 24 点后进入对应页面；说“提醒我在20分钟之后开会”会写入功能→待办提醒，到时弹窗、蜂鸣并尝试语音播报；语音闹钟可通过“明天早上7点叫我起床”等说法设置，功能→闹钟也能手动设定时间和每日重复；闹钟音量在设定→音量单独调节，不受媒体静音/媒体音量影响；带日期和时刻的普通提醒仍保存到倒数日；“记一下……”保存到备忘；表达不开心时以健康页今日记录提供非诊断性建议，不把健康记录发送给云端。
 
 ### 词典（BandLingo 风格）
 - 本地词库约 6.5 万词（`word|definition`，a–z 分片，LRU 缓存）
@@ -51,7 +51,7 @@ vendor/allwinnertech/apps/flowdesk/
   dm_wifi.c / dm_ui_wifi.c          # WiFi + 设定入口
   dm_ui_btnet.c                     # 蓝牙耳机 A2DP
   dm_ui_appconn.c / dm_ble_gatt.c   # App BLE 配对
-  dm_ui_chat.c / dm_chat_ai.c / dm_voice.c / dm_assistant.c / dm_ui_recorder.c
+  dm_ui_chat.c / dm_chat_ai.c / dm_voice.c / dm_assistant.c / dm_ui_recorder.c / dm_ui_remind.c
   dm_dict.c / dm_ui_dict.c
   dm_audio_vol.c / dm_ui_vol.c / dm_audio_route.c
   dm_tts_voice.c / dm_ui_voice.c
