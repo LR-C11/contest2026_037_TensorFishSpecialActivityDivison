@@ -1,4 +1,4 @@
-# FlowDesk — Gemini-S1 桌搭伴侣（v0.18.2）
+# FlowDesk — Gemini-S1 桌搭伴侣（v0.19.0）
 
 全新应用，**未复用**参赛仓 `desk_companion` 源码。
 
