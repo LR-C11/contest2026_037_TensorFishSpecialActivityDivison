@@ -22,14 +22,13 @@
 - 英文查词 / 中文查释义 / 每日一词 / AI 释义
 - **独立可滑动页面**：查词列表、释义详情
 
-### 设定（7 项，可滑动）
+### 设定（应用设置，可滑动）
 | 项 | 说明 |
 |----|------|
 | Wi-Fi | 手动扫描连接（`wapi` 重试） |
 | 日期与时间 | 网络 NTP 不可用时手动校准；保存一个下次启动可用的本地时间种子 |
-| 蓝牙耳机 | A2DP Source 扫描/连接耳机 |
 | App 连接 | 专属 BLE Challenge-Response 配对 |
-| 音量 | 滑杆 / 静音 / 试听 + **音频输出**（自动/喇叭/耳机） |
+| 音量 | 滑杆 / 静音 / 试听 + 自动或扬声器输出 |
 | 播报声音 | 冰糖 / 茉莉 / 苏打 / 白桦 等多音色 |
 | 关于 | 独立页：版本 + 开发者信息 |
 
@@ -39,7 +38,8 @@
 
 ### 其它
 - 背单词、2048、MBTI、备忘、吃药、喝水、计算器等
-- 功能页「录音管理」：独立页面，最多保存 10 段录音、每段最长 30 秒；以循环槽位保存在 `/data/flowdesk_recording_01.wav` 至 `_10.wav`，可选择并通过板载扬声器回放。满 10 段后新录音覆盖最旧槽位。
+- 功能页「录音机」：最多保存 10 段录音、每段最长 10 分钟；以循环槽位保存在 `/data/flowdesk_recording_01.wav` 至 `_10.wav`，可选择并通过板载扬声器回放。满 10 段后新录音覆盖最旧槽位。
+- 功能页「会议摘要」：单次录音最长 10 分钟；停止后音频留存在 `/data`，点击分析才上传 ASR，随后由 MiMo v2.6 Flash 提炼要点并通过 TTS 播报。会议音频、转写和摘要最多保留 3 份。
 - **底栏**：专注 / 聊天 / 健康 / 功能 / 设定
 
 ## 目录
@@ -49,7 +49,6 @@ vendor/allwinnertech/apps/flowdesk/
   deskmate.h / deskmate_main.c / dm_state.c / dm_face.c / dm_roll.c
   dm_ui_focus.c / dm_ui_shells.c / dm_ui_health.c
   dm_wifi.c / dm_ui_wifi.c          # WiFi + 设定入口
-  dm_ui_btnet.c                     # 蓝牙耳机 A2DP
   dm_ui_appconn.c / dm_ble_gatt.c   # App BLE 配对
   dm_ui_chat.c / dm_chat_ai.c / dm_voice.c / dm_assistant.c / dm_ui_recorder.c / dm_ui_remind.c
   dm_dict.c / dm_ui_dict.c
@@ -79,13 +78,6 @@ rm -f vendor/allwinnertech/apps/libapps.a nuttx/staging/libapps.a
 ./build.sh vendor/allwinnertech/boards/r528/r528s3-gemini-s1/configs/nsh_minidisplay/ -j8
 
 strings nuttx/vela.bin | grep '0.18.1'
-```
-
-改过 `defconfig`（如 A2DP Source）时先：
-
-```bash
-./build.sh vendor/allwinnertech/boards/r528/r528s3-gemini-s1/configs/nsh_minidisplay/ distclean -j8
-./build.sh vendor/allwinnertech/boards/r528/r528s3-gemini-s1/configs/nsh_minidisplay/ -j8
 ```
 
 ## 打包
@@ -124,12 +116,9 @@ flowdesk &
 
 ```
 CONFIG_DESKMATE_APP=y
-CONFIG_BLUETOOTH_A2DP_SOURCE=y
-CONFIG_BT_A2DP_SOURCE=y
 ```
 
 ## 说明
 
 - 中文优先 FreeType MiSans，否则 Montserrat
 - **未改驱动**（`chips/` 保持官方）；仅本目录 + defconfig/资源
-- 蓝牙耳机需耳机进入**配对模式**后再扫描连接

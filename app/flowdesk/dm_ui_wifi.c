@@ -980,7 +980,6 @@ void dm_create_settings(void)
   s_set_page = mk_page(PAGE_SETTINGS);
   title = dm_lbl(s_set_page, "设定", "Settings", g_dm_font_m, C_INK);
   lv_obj_set_pos(title, 12, 8);
-
   /* Scrollable settings container */
   lv_obj_t *sc = lv_obj_create(s_set_page);
   lv_obj_set_size(sc, 304, 160);

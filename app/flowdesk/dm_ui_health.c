@@ -15,6 +15,7 @@
 #ifdef CONFIG_DESKMATE_APP
 
 #define DM_MOOD_PATH "/data/deskmate_mood.bin"
+#define DM_MOOD_TMP_PATH "/data/deskmate_mood.bin.tmp"
 #define DM_MOOD_MAGIC 0x4d4f4f45u /* 'MOOD' v2: + yday for daily reset */
 
 #define M_NEG (DM_M_SAD | DM_M_ANGRY | DM_M_TIRED | DM_M_ANXIOUS | \
@@ -80,6 +81,8 @@ static uint16_t s_pick_mask;
 static uint8_t s_pick_quick;
 static uint8_t s_pick_type;
 
+static void paint_log_picks(void);
+
 /* ---------- storage ---------- */
 
 typedef struct
@@ -104,9 +107,10 @@ static int health_today_key(void)
 
 static int s_health_day_key = -1;
 
-static void store_save(void)
+static int store_save(void)
 {
   dm_mood_file_t f;
+  size_t written = 0;
   int fd;
 
   memset(&f, 0, sizeof(f));
@@ -120,13 +124,28 @@ static void store_save(void)
       memcpy(f.recs, s_recs, sizeof(dm_mood_rec_t) * (size_t)s_rec_n);
     }
 
-  fd = open(DM_MOOD_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  fd = open(DM_MOOD_TMP_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0666);
   if (fd < 0)
     {
-      return;
+      return -1;
     }
-  (void)write(fd, &f, sizeof(f));
-  close(fd);
+  while (written < sizeof(f))
+    {
+      ssize_t n = write(fd, (const char *)&f + written, sizeof(f) - written);
+      if (n <= 0)
+        {
+          close(fd);
+          unlink(DM_MOOD_TMP_PATH);
+          return -1;
+        }
+      written += (size_t)n;
+    }
+  if (close(fd) != 0 || rename(DM_MOOD_TMP_PATH, DM_MOOD_PATH) != 0)
+    {
+      unlink(DM_MOOD_TMP_PATH);
+      return -1;
+    }
+  return 0;
 }
 
 static void health_rollover_if_new_day(void)
@@ -1032,6 +1051,145 @@ static void now_hm(uint8_t *h, uint8_t *m)
   localtime_r(&t, &tmv);
   *h = (uint8_t)tmv.tm_hour;
   *m = (uint8_t)tmv.tm_min;
+}
+
+static int voice_mood_term_negated(const char *text, const char *found)
+{
+  static const char *const negations[] = {
+    "并不是", "没有", "并不", "不太", "不再", "没那么", "不", "没", "未"
+  };
+  size_t i;
+
+  for (i = 0; i < sizeof(negations) / sizeof(negations[0]); i++)
+    {
+      size_t n = strlen(negations[i]);
+      if (found >= text + n && memcmp(found - n, negations[i], n) == 0)
+        {
+          return 1;
+        }
+    }
+  return 0;
+}
+
+int dm_health_record_mood_voice(const char *text)
+{
+  static const struct
+  {
+    const char *word;
+    uint16_t bit;
+  } terms[] = {
+    { "心情不好", DM_M_SAD }, { "心情差", DM_M_SAD },
+    { "情绪低落", DM_M_SAD }, { "不开心", DM_M_SAD },
+    { "不高兴", DM_M_SAD }, { "不太开心", DM_M_SAD },
+    { "不太高兴", DM_M_SAD }, { "不愉快", DM_M_SAD },
+    { "难过", DM_M_SAD }, { "伤心", DM_M_SAD },
+    { "悲伤", DM_M_SAD }, { "沮丧", DM_M_SAD },
+    { "难受", DM_M_SAD }, { "开心", DM_M_JOY },
+    { "高兴", DM_M_JOY }, { "愉快", DM_M_JOY },
+    { "喜爱", DM_M_LOVE }, { "幸福", DM_M_LOVE },
+    { "兴奋", DM_M_EXCITE }, { "激动", DM_M_EXCITE },
+    { "有活力", DM_M_EXCITE }, { "自信", DM_M_CONFIDENT },
+    { "有信心", DM_M_CONFIDENT }, { "期待", DM_M_EXPECT },
+    { "满足", DM_M_SATISFY }, { "满意", DM_M_SATISFY },
+    { "感动", DM_M_TOUCHED }, { "平静", DM_M_CALM },
+    { "平和", DM_M_CALM }, { "放松", DM_M_CALM },
+    { "安心", DM_M_CALM }, { "若有所思", DM_M_THINK },
+    { "思考", DM_M_THINK }, { "惊讶", DM_M_SURPRISE },
+    { "生气", DM_M_ANGRY }, { "愤怒", DM_M_ANGRY },
+    { "烦躁", DM_M_ANGRY }, { "恼火", DM_M_ANGRY },
+    { "疲惫", DM_M_TIRED }, { "很累", DM_M_TIRED },
+    { "累", DM_M_TIRED }, { "困", DM_M_TIRED },
+    { "焦虑", DM_M_ANXIOUS }, { "紧张", DM_M_ANXIOUS },
+    { "担心", DM_M_ANXIOUS }, { "不安", DM_M_ANXIOUS },
+    { "孤独", DM_M_LONELY }, { "孤单", DM_M_LONELY },
+    { "压力很大", DM_M_STRESS }, { "压力大", DM_M_STRESS },
+    { "有压力", DM_M_STRESS }, { "压力", DM_M_STRESS }
+  };
+  dm_mood_rec_t rec;
+  dm_mood_rec_t old_recs[DM_MOOD_REC_MAX];
+  uint16_t mask = 0;
+  uint8_t quick = 0;
+  int old_n;
+  size_t i;
+
+  if (!text || !text[0])
+    {
+      return -1;
+    }
+
+  for (i = 0; i < sizeof(terms) / sizeof(terms[0]); i++)
+    {
+      const char *found = strstr(text, terms[i].word);
+      if (!found)
+        {
+          continue;
+        }
+      /* "不开心/不高兴" are sadness labels, but do not also score them as
+       * positive happiness. Other negated states are not logged as facts. */
+      if ((terms[i].bit == DM_M_JOY &&
+           (strstr(text, "不开心") || strstr(text, "不高兴") ||
+            strstr(text, "不愉快") || strstr(text, "心情不好") ||
+            strstr(text, "心情差"))) ||
+          (terms[i].bit == DM_M_STRESS &&
+           (strstr(text, "压力不大") || strstr(text, "压力不高") ||
+            strstr(text, "没有压力") || strstr(text, "没压力"))) ||
+          voice_mood_term_negated(text, found))
+        {
+          continue;
+        }
+      mask |= terms[i].bit;
+    }
+
+  if (strstr(text, "心情不错") || strstr(text, "心情很好") ||
+      strstr(text, "心情挺好")) quick = 1;
+  else if (strstr(text, "感觉一般") || strstr(text, "心情一般") ||
+           strstr(text, "一般般")) quick = 2;
+  else if (strstr(text, "有点不开心") || strstr(text, "有点不高兴")) quick = 3;
+  else if (strstr(text, "很累想休息") || strstr(text, "累想休息")) quick = 4;
+  else if (strstr(text, "充满活力")) quick = 5;
+  else if (strstr(text, "心平气和")) quick = 6;
+  else if (strstr(text, "坐立不安")) quick = 7;
+  else if (strstr(text, "若有所思")) quick = 8;
+
+  if (mask == 0 && quick == 0)
+    {
+      s_pick_mask = 0;
+      s_pick_quick = 0;
+      s_pick_type = 0;
+      paint_log_picks();
+      return -1;
+    }
+
+  health_rollover_if_new_day();
+  memset(&rec, 0, sizeof(rec));
+  rec.mood_mask = mask;
+  rec.quick = quick;
+  rec.rec_type = (strstr(text, "今天整体") || strstr(text, "今日整体")) ? 1 : 0;
+  now_hm(&rec.hour, &rec.min);
+
+  old_n = s_rec_n;
+  memcpy(old_recs, s_recs, sizeof(old_recs));
+  if (s_rec_n < DM_MOOD_REC_MAX)
+    {
+      memmove(&s_recs[1], &s_recs[0], sizeof(dm_mood_rec_t) * (size_t)s_rec_n);
+      s_rec_n++;
+    }
+  else
+    {
+      memmove(&s_recs[1], &s_recs[0],
+              sizeof(dm_mood_rec_t) * (DM_MOOD_REC_MAX - 1));
+    }
+  s_recs[0] = rec;
+
+  if (store_save() != 0)
+    {
+      memcpy(s_recs, old_recs, sizeof(old_recs));
+      s_rec_n = old_n;
+      return -2;
+    }
+
+  dm_health_refresh();
+  return 0;
 }
 
 void dm_health_add_focus_min(int32_t min)

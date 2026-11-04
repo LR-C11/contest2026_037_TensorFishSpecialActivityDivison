@@ -114,7 +114,8 @@ void dm_create_features(void)
     { "待办提醒", "To-do", "语音添加，到时播报", "Voice add and speak when due", PAGE_TODO },
     { "闹钟", "Alarm", "语音或手动设定", "Set by voice or manually", PAGE_ALARM },
     { "倒数日", "Countdown", "还剩多少天", "Days left", PAGE_COUNTDOWN },
-    { "录音机", "Recorder", "录音保存并用喇叭回放", "Record and replay on speaker", PAGE_RECORDER },
+    { "录音机", "Recorder", "最长10分钟，本地保存", "Up to 10 minutes, stored locally", PAGE_RECORDER },
+    { "会议摘要", "Meeting brief", "录音、转写、提炼要点", "Record, transcribe, summarize", PAGE_MEETING },
     { "吃什么", "Eat", "随机帮你选一顿", "Random meal", PAGE_EAT },
     { "24 点", "24", "四张牌凑 24", "Make 24", PAGE_24 },
     { "画板涂鸦", "Draw", "随手画两笔", "Doodle", PAGE_DRAW },
@@ -213,7 +214,8 @@ void dm_dock_highlight(dm_page_t p)
            p == PAGE_MBTI || p == PAGE_MBTI_Q || p == PAGE_MBTI_RESULT ||
            p == PAGE_NOTE_ADD || p == PAGE_NOTE_KB ||
            p == PAGE_DICT || p == PAGE_DICT_SEARCH || p == PAGE_DICT_DETAIL ||
-           p == PAGE_RECORDER || p == PAGE_TODO || p == PAGE_ALARM)
+           p == PAGE_RECORDER || p == PAGE_TODO || p == PAGE_ALARM ||
+           p == PAGE_ALARM_ADD || p == PAGE_MEETING || p == PAGE_MEETING_DETAIL)
     {
       focus_key = PAGE_FEATURES;
     }
