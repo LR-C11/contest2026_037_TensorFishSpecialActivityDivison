@@ -4,7 +4,7 @@
 
 **心流桌伴**（中文）/ **FlowDesk**（English）— openvela 智能桌搭陪伴终端 / OpenVela desk companion terminal
 
-**Version:** 0.18.1  
+**Version:** 0.19.0  
 **Track / 赛道:** AI 硬件产品创新 / AI Hardware Product Innovation  
 **Team / 队伍:** TensorFishSpecialActivityDivison (037)  
 **Author / 作者:** LR-C11
@@ -14,10 +14,10 @@
 ## 一、作品简介 / Introduction
 
 **中文：**  
-**心流桌伴（FlowDesk）** 针对桌搭产品「功能单一、缺少陪伴」的问题，基于 **Gemini-S1（全志 R528 / OpenVela）** 实现一款多功能桌面终端。本地集成专注计时、6.5 万词词典、健康情绪综合分、备忘、吃药与喝水提醒、背单词、2048、MBTI 等能力。语音聊天支持**点按录音**，完整链路为：麦克风录音 → 云端 ASR 识别 → 大模型生成回复 → TTS 合成语音 → 喇叭/蓝牙耳机播放；联网时接入小米 **MiMo**，助手自称 **openvela小助手**，断网自动降级为本地回复与离线提示音。界面以 LVGL 320×240 单屏 + 底部五栏导航组织，吉祥物贯穿专注与聊天场景。
+**心流桌伴（FlowDesk）** 针对桌搭产品「功能单一、缺少陪伴」的问题，基于 **Gemini-S1（全志 R528 / OpenVela）** 实现一款多功能桌面终端。本地集成专注计时、6.5 万词词典、健康情绪综合分、备忘、吃药与喝水提醒、背单词、待办/闹钟、录音机、会议摘要、2048、MBTI 等能力。语音聊天支持**点按录音**，完整链路为：麦克风录音 → 云端 ASR 识别 → **本地意图路由**（计时、提醒、备忘、打卡等直接执行）→ 未命中时大模型生成回复 → TTS 合成语音 → 喇叭播放；联网时接入小米 **MiMo**，助手自称 **openvela小助手**，断网自动降级为本地回复与离线提示音。界面以 LVGL 320×240 单屏 + 底部五栏导航组织，吉祥物贯穿专注与聊天场景。
 
 **English:**  
-**FlowDesk (心流桌伴)** is a multi-function desk companion on **Gemini-S1 (R528 / OpenVela)**. On-device features include focus timer, 65k-word dictionary, multi-factor mood score, notes, med/water reminders, word study, 2048, and MBTI. Voice chat uses **tap-to-talk**: mic capture → cloud ASR → LLM reply → TTS speech → speaker / BT headset. Online path uses Xiaomi **MiMo** (assistant: **openvela小助手**); offline falls back to local replies and alert tones. UI is LVGL 320×240 with a 5-tab dock and a shared mascot.
+**FlowDesk (心流桌伴)** is a multi-function desk companion on **Gemini-S1 (R528 / OpenVela)**. On-device features include focus timer, 65k-word dictionary, multi-factor mood score, notes, med/water reminders, word study, to-do/alarm, voice recorder, meeting brief, 2048, and MBTI. Voice chat uses **tap-to-talk**: mic capture → cloud ASR → **local intent routing** (timers, reminders, notes, check-ins execute on-device) → unmatched intents go to the LLM → TTS speech → speaker. Online path uses Xiaomi **MiMo** (assistant: **openvela小助手**); offline falls back to local replies and alert tones. UI is LVGL 320×240 with a 5-tab dock and a shared mascot.
 
 ---
 
@@ -43,58 +43,59 @@
 | 步骤 Step | 操作 Action | 屏幕 Screen | 按钮 Button |
 |-----------|-------------|-------------|-------------|
 | 1 | 点「开始说话」 | 提示「录音中… 再点一下结束」 | 变红「结束并发送」 |
-| 2 | 再点一下 | 「识别中… / 发送中…」 | 「处理中…」 |
-| 3 | 等待云端 | 先显示**文字回复** | — |
+| 2 | 再点一下（或 6 秒自动结束） | 「识别中… / 发送中…」 | 「处理中…」 |
+| 3 | 等待处理 | 先显示**文字回复** | — |
 | 4 | 自动播报 | 「已通过喇叭播放回复」 | 恢复「开始说话」 |
 
-- 最长录音约 12 秒，可提前结束
+- 录音约 6 秒上限，可提前结束；无麦克风时自动降级为文字对话
 - 支持点吉祥物快速文本闲聊（同样走 LLM + TTS）
-- 无麦克风时自动降级为文字对话
 
 **完整链路 / Pipeline**
 
 ```text
 [1] 录音
     用户点按开始/结束
-    → /dev/audio/pcm0c（16kHz / 16bit / 单声道 WAV）
+    → /dev/audio/pcm0c（8kHz / 16bit / 单声道）
     → /tmp/dm_voice_in.wav
 
 [2] 语音识别 ASR
-    POST https://token-plan-sgp.xiaomimimo.com/v1/audio/transcriptions
-    model = mimo-v2.5-asr
+    POST https://token-plan-sgp.xiaomimimo.com/v1/chat/completions
+    model = mimo-v2.5-asr（input_audio 内容段，data URL）
     → 用户文本
 
-[3] 大模型对话 LLM
-    POST https://token-plan-sgp.xiaomimimo.com/v1/chat/completions
+[3] 本地意图路由（dm_assistant.c）
+    命中直接执行：专注计时（「计时20分钟」）、待办（「20分钟后提醒我开会」）、
+    闹钟（「明天早上7点叫我起床」）、备忘（「记一下…」）、倒数日、MBTI、
+    心情记录与安慰、已登记药品服药打卡、小游戏（2048/猜数字/24点）等
+    未命中 → 进入 [4]
+
+[4] 大模型对话 LLM
+    POST .../v1/chat/completions
     model = mimo-v2.6-flash
     人设：openvela小助手，口语化、简短（约 60 字内）
     → 回复文本（先显示在屏幕）
 
-[4] 语音合成 TTS
-    POST https://token-plan-sgp.xiaomimimo.com/v1/audio/speech
+[5] 语音合成 TTS
+    POST .../v1/chat/completions
     model = mimo-v2.5-tts
     voice = 设定页所选音色（冰糖/茉莉/苏打/白桦…）
     → /tmp/dm_voice_out.wav
 
-[5] 播放 Playback
-    按「音频输出」设置：
-      自动 → 有蓝牙耳机走 A2DP，否则喇叭
-      喇叭 → nxplayer / play，或写 /dev/audio/pcm0p（4Ω 3W）
-      耳机 → bttool a2dp play
-    音量来自设定页滑杆（0–100% → 硬件 0–1000）
+[6] 播放 Playback
+    → /dev/audio/pcm0p（4Ω 3W 喇叭）
+    音量来自设定页滑杆；闹钟/提醒使用独立提示音量
 ```
 
 **设计说明 / Design notes**
 
-- 网络请求在后台线程执行，不阻塞 LVGL UI
+- 网络请求在后台线程执行，不阻塞 LVGL UI；curl 选项集中在 `-K` 配置文件以适配 NSH 参数限制
 - 超时约 25s；失败提示「没听清或网络忙」
-- 鉴权：`Authorization: Bearer <API_KEY>`（OpenAI 兼容）
-- 文案与音色可在设定页试听切换
-- 扩展：可继续用同一链路做 TTS 播报提醒（吃药/喝水/简报）
+- 鉴权：`Authorization: Bearer <API_KEY>`（OpenAI 兼容）；`/data/deskmate_mimo.key` 存在且有效时覆盖固件内置凭据
+- 心情低落类表达的回应保持倾听与非诊断，情绪记录文本不发送云端
 
 #### 健康 Health
 - 情绪综合分（多因子本地计算）Multi-factor mood score
-- 心情记录 Mood log
+- 心情记录 Mood log（手动标签 + 语音自动记录）
 - 吃药 / 喝水提醒：到点**主动离线提示音 + 屏幕文字**，联网可语音
 
 #### 词典 Dictionary（独立可滑动页）
@@ -110,7 +111,7 @@
 | 中文 | English |
 |------|---------|
 | 词典（查词 / 每日一词 / AI） | Dictionary (lookup / daily / AI) |
-| 备忘（列表/添加/拼音/持久化） | Notes (list/add/pinyin/persist) |
+| 备忘（列表/添加/拼音/持久化，语音「记一下…」） | Notes (list/add/pinyin/persist, voice) |
 | 背单词 1000+（学/练/测/错题） | Word Memo 1000+ (study/quiz/wrong) |
 | 计算器 | Calculator |
 | 倒数日 | Countdown |
@@ -118,29 +119,38 @@
 **生活健康 Life & Health**
 | 中文 | English |
 |------|---------|
-| 吃药提醒（每天 1/2/3 次） | Med reminders (1–3×/day) |
+| 吃药提醒（每天 1/2/3 次，语音打卡） | Med reminders (1–3×/day, voice check-in) |
 | 喝水提醒打卡 | Water check-in |
+| 待办提醒（语音添加，到点弹窗/蜂鸣/播报） | To-do (voice add, alert when due) |
+| 闹钟（手动或语音设定，单次/每天） | Alarm (manual or voice, once/daily) |
 | 吃什么随机 | What to eat |
 | BMI 计算 | BMI |
 | 环境传感（温湿度/光照） | Sensors (temp/humi/light) |
+
+**录音与会议 Recorder & Meeting**
+| 中文 | English |
+|------|---------|
+| 录音机：10 个循环槽位，每段最长 10 分钟，本地回放 | Recorder: 10 slots × 10 min, local playback |
+| 会议摘要：录音 → 转写 → 提炼要点 → TTS，保留 3 份 | Meeting brief: record → transcribe → summarize → TTS, keep 3 |
 
 **游戏与测试 Games & Tests**
 | 中文 | English |
 |------|---------|
 | 2048（滑动合并、最佳分） | 2048 (swipe merge, best score) |
 | 猜数字 1–100 | Guess number |
+| 单位换算（长度/重量/温度） | Unit converter (length/weight/temp) |
 | 24 点 | Make 24 |
 | 画板涂鸦 | Doodle |
 | MBTI：4 套 × 52 题，四维百分比 | MBTI: 4 banks × 52, % per dimension |
 
-**设定 Settings（6 项，可滑动）**
+**设定 Settings（可滑动）**
 | 中文 | English |
 |------|---------|
-| Wi-Fi：扫描 / 连接 / 开关 / 状态 | Wi-Fi: scan / connect / switch / status |
-| 蓝牙耳机：A2DP 扫描/连接/断开 | BT headset: A2DP scan/connect |
-| App 连接：BLE 专属 Challenge-Response 配对 | App: dedicated BLE pairing |
-| 音量：滑杆 / 静音 / 试听 / **音频输出** | Volume: slider / mute / test / **output channel** |
-| 播报声音：冰糖/茉莉/小云/苏打/白桦/小川/电子音/深海 | TTS voice picker (8 styles) |
+| Wi-Fi：扫描 / 连接 / 开关 / 状态，保存凭据开机自动回连 | Wi-Fi: scan / connect / switch / status, auto-reconnect |
+| 日期与时间：手动校准 + NTP 自动对时（TLS 验证依赖有效时间） | Date & time: manual set + NTP (TLS needs valid time) |
+| App 连接：BLE 专属 Challenge-Response 配对（入口隐藏，代码保留） | App: dedicated BLE pairing (entry hidden, code kept) |
+| 音量：媒体与闹钟分开 / 静音 / 试听 | Volume: media & alarm separate / mute / test |
+| 播报声音：冰糖/茉莉/苏打/白桦等多音色（预置可离线试听） | TTS voice picker (preset voices previewable offline) |
 | 关于：独立页，版本 + 开发者信息 | About: standalone page |
 
 #### 吉祥物 Mascot
@@ -164,22 +174,26 @@
 | 项 Item | 说明 Description |
 |---------|------------------|
 | 图形 Graphics | LVGL on OpenVela/NuttX；SPI LCD 320×240 + 触摸 |
-| 语音输入 Mic | `/dev/audio/pcm0c`，16kHz/16bit/Mono WAV，tap-to-talk |
-| 语音输出 Speaker | `/dev/audio/pcm0p` 4Ω 3W；或 A2DP 蓝牙耳机 |
-| 云端 AI Cloud | MiMo ASR / Chat / TTS（OpenAI 兼容 HTTPS） |
+| 语音输入 Mic | `/dev/audio/pcm0c`，8kHz/16bit/Mono，tap-to-talk（nxrecorder） |
+| 语音输出 Speaker | `/dev/audio/pcm0p` 4Ω 3W（nxplayer playraw + 16kHz 重采样） |
+| 云端 AI Cloud | MiMo ASR / Chat / TTS 共用 Chat Completions（OpenAI 兼容 HTTPS） |
+| 本地意图 Intent | `dm_assistant.c` 关键词 + 中文数字/时刻解析，命中本地执行 |
 | 蓝牙 BT | BLE Challenge-Response 配对；A2DP Source 耳机输出 |
 | 词典 Dict | 本地分片词库 + 云端 AI 释义 |
-| 音量 Volume | `AUDIO_FU_VOLUME` ioctl（0–1000）+ 软件路由 |
-| 降级 Degradation | 无网：本地聊天、离线提示音、词典/专注等全开 |
+| 音量 Volume | `snd_ctl` DAC 数字音量 + 媒体/闹钟分离 |
+| 网络请求 HTTP | 系统 `curl -K <config>`：选项与鉴权头写入临时配置文件 |
+| 时间 Time | NTP 自动对时 + 手动校准种子；HTTPS/TLS 验证依赖有效系统时间 |
+| 降级 Degradation | 无网：本地聊天、离线提示音、词典/专注/录音等全开 |
 
 MiMo 接口 / Endpoint:
 
 ```text
 https://token-plan-sgp.xiaomimimo.com/v1
-  /audio/transcriptions   model: mimo-v2.5-asr
-  /chat/completions       model: mimo-v2.6-flash
-  /audio/speech           model: mimo-v2.5-tts
+  /chat/completions   model: mimo-v2.5-asr   (input_audio)
+  /chat/completions   model: mimo-v2.6-flash (chat)
+  /chat/completions   model: mimo-v2.5-tts   (speech)
 Auth: Authorization: Bearer <API_KEY>
+     （/data/deskmate_mimo.key 可覆盖内置凭据）
 ```
 
 ---
@@ -188,12 +202,13 @@ Auth: Authorization: Bearer <API_KEY>
 
 ```text
 app/flowdesk/           # FlowDesk 应用源码 / application source
-  dm_ui_chat.c          # 语音聊天 UI（点按录音）
-  dm_voice.c            # 录音 / ASR / LLM / TTS / 播放
-  dm_dict.c, dm_ui_dict.c
-  dm_audio_vol.c, dm_audio_route.c
-  dm_proactive.c        # 主动提醒
-  dm_ble_gatt.c         # BLE 配对
+  deskmate_main.c, dm_state.c, dm_face.c
+  dm_ui_focus.c / dm_ui_chat.c / dm_ui_health.c / dm_ui_shells.c
+  dm_voice.c / dm_chat_ai.c / dm_assistant.c   # 语音链路 + 本地意图
+  dm_ui_recorder.c / dm_ui_meeting.c / dm_ui_remind.c
+  dm_dict.c, dm_ui_dict.c / dm_ui_word.c
+  dm_wifi.c, dm_ui_wifi.c / dm_ui_vol.c / dm_audio_vol.c, dm_audio_route.c
+  dm_ble_gatt.c / dm_ui_appconn.c / dm_tts_voice.c / dm_proactive.c
   docs/场景说明.md
 logs/                   # AI Coding 日志 / AI coding session logs
 board/                  # 板级相关（如有）
@@ -208,7 +223,7 @@ board/                  # 板级相关（如有）
 ```bash
 cd <openvela-root>
 ./build.sh vendor/allwinnertech/boards/r528/r528s3-gemini-s1/configs/nsh_minidisplay/ -j8
-strings nuttx/vela.bin | grep '0.18.1'
+strings nuttx/vela.bin | grep '0.19.0'
 
 cp -f nuttx/vela.bin \
   vendor/allwinnertech/lichee/board/r528s3/gemini-s1_nand/configs/nsh.fex
@@ -218,11 +233,12 @@ pack
 ```
 
 镜像 / Image: `out/r528s3/gemini-s1_nand/rtos_nuttx_r528s3-gemini-s1_uart0_128Mnand.img`  
-烧录 / Flash: PhoenixSuit。
+烧录 / Flash: PhoenixSuit。  
+启动 / Launch: `nsh> flowdesk`（成功日志含 `FlowDesk 0.19.0 focus-home`）。
 
 **语音聊天试用 / Try voice chat**
 
-1. 板子联网（Wi-Fi 或蓝牙 PAN / 手机热点）
+1. 板子联网（Wi-Fi 扫描连接，保存后开机自动回连）
 2. 底栏 → 聊天 → 点「开始说话」
 3. 对着咪头说话，再点一下结束
 4. 屏幕出文字回复，喇叭自动播放
@@ -231,9 +247,9 @@ pack
 
 ## 六、AI Coding 说明 / AI Coding
 
-本作品使用 AI 辅助进行：方案拆解、LVGL 界面、词典引擎、语音链路（ASR/LLM/TTS）、蓝牙 BLE/A2DP、音量路由、主动提醒与文档整理。对话日志见 `logs/` 目录。
+本作品使用 AI 辅助进行：方案拆解、LVGL 界面、词典引擎、语音链路（ASR/LLM/TTS）、本地意图路由、录音/会议摘要、蓝牙 BLE/A2DP、音量路由、主动提醒与文档整理。对话日志见 `logs/` 目录。
 
-AI assisted architecture, LVGL UI, dictionary, voice pipeline (ASR/LLM/TTS), BT, volume routing, proactive notices, and docs. Session logs under `logs/`.
+AI assisted architecture, LVGL UI, dictionary, voice pipeline (ASR/LLM/TTS), local intent routing, recorder/meeting brief, BT, volume routing, proactive notices, and docs. Session logs under `logs/`.
 
 ---
 
