@@ -148,7 +148,6 @@
 |------|---------|
 | Wi-Fi：扫描 / 连接 / 开关 / 状态，保存凭据开机自动回连 | Wi-Fi: scan / connect / switch / status, auto-reconnect |
 | 日期与时间：手动校准 + NTP 自动对时（TLS 验证依赖有效时间） | Date & time: manual set + NTP (TLS needs valid time) |
-| App 连接：BLE 专属 Challenge-Response 配对（入口隐藏，代码保留） | App: dedicated BLE pairing (entry hidden, code kept) |
 | 音量：媒体与闹钟分开 / 静音 / 试听 | Volume: media & alarm separate / mute / test |
 | 播报声音：冰糖/茉莉/苏打/白桦等多音色（预置可离线试听） | TTS voice picker (preset voices previewable offline) |
 | 关于：独立页，版本 + 开发者信息 | About: standalone page |
