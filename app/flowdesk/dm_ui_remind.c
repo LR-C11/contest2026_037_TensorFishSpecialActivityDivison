@@ -68,6 +68,10 @@ static lv_obj_t *s_alarm_time;
 static lv_obj_t *s_alarm_repeat_btn;
 static lv_obj_t *s_alarm_repeat_label;
 static lv_obj_t *s_alarm_hint;
+static lv_obj_t *s_alarm_empty;
+static lv_obj_t *s_alarm_empty_add;
+static lv_obj_t *s_alarm_plus;
+static lv_obj_t *s_alarm_delete;
 static lv_obj_t *s_alert;
 static lv_obj_t *s_alert_title;
 static lv_obj_t *s_alert_text;
@@ -356,11 +360,47 @@ static void alarm_adjust_cb(lv_event_t *e);
 static void alarm_repeat_cb(lv_event_t *e);
 static void alarm_add_cb(lv_event_t *e);
 static void alarm_delete_cb(lv_event_t *e);
+static void alarm_open_add_cb(lv_event_t *e);
+static void alarm_form_back_cb(lv_event_t *e);
 
 static void reminder_back(lv_event_t *e)
 {
   (void)e;
   dm_show(PAGE_FEATURES);
+}
+
+static void alarm_open_add_cb(lv_event_t *e)
+{
+  time_t now = time(NULL);
+  struct tm tmv;
+  (void)e;
+
+  s_alarm_repeat = 0;
+  if (localtime_r(&now, &tmv) && tmv.tm_year + 1900 >= 2024)
+    {
+      tmv.tm_min++;
+      if (tmv.tm_min >= 60)
+        {
+          tmv.tm_min = 0;
+          tmv.tm_hour = (tmv.tm_hour + 1) % 24;
+        }
+      s_alarm_hour = tmv.tm_hour;
+      s_alarm_minute = tmv.tm_min;
+    }
+  else
+    {
+      s_alarm_hour = 7;
+      s_alarm_minute = 0;
+    }
+  alarm_time_paint();
+  if (s_alarm_hint) lv_label_set_text(s_alarm_hint, "");
+  dm_show(PAGE_ALARM_ADD);
+}
+
+static void alarm_form_back_cb(lv_event_t *e)
+{
+  (void)e;
+  dm_show(PAGE_ALARM);
 }
 
 static void reminder_select(lv_event_t *e)
@@ -524,6 +564,35 @@ static void reminder_paint(void)
           lv_obj_clear_flag(row, LV_OBJ_FLAG_HIDDEN);
           alarm_row++;
         }
+    }
+
+  if (s_alarm_empty)
+    {
+      if (alarm_row == 0)
+        lv_obj_clear_flag(s_alarm_empty, LV_OBJ_FLAG_HIDDEN);
+      else
+        lv_obj_add_flag(s_alarm_empty, LV_OBJ_FLAG_HIDDEN);
+    }
+  if (s_alarm_empty_add)
+    {
+      if (alarm_row == 0)
+        lv_obj_clear_flag(s_alarm_empty_add, LV_OBJ_FLAG_HIDDEN);
+      else
+        lv_obj_add_flag(s_alarm_empty_add, LV_OBJ_FLAG_HIDDEN);
+    }
+  if (s_alarm_plus)
+    {
+      if (alarm_row > 0)
+        lv_obj_clear_flag(s_alarm_plus, LV_OBJ_FLAG_HIDDEN);
+      else
+        lv_obj_add_flag(s_alarm_plus, LV_OBJ_FLAG_HIDDEN);
+    }
+  if (s_alarm_delete)
+    {
+      if (alarm_row > 0 && s_alarm_sel >= 0)
+        lv_obj_clear_flag(s_alarm_delete, LV_OBJ_FLAG_HIDDEN);
+      else
+        lv_obj_add_flag(s_alarm_delete, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -735,6 +804,7 @@ void dm_create_reminders(void)
   lv_obj_t *row;
   lv_obj_t *label;
   lv_obj_t *button;
+  lv_obj_t *time_panel;
   int i;
 
   mkdir("/data", 0755);
@@ -773,16 +843,16 @@ void dm_create_reminders(void)
   lv_obj_set_pos(button, 16, 204);
 
   page = reminder_page(PAGE_ALARM, "闹钟");
-  sc = reminder_list(page, 34, 92);
+  sc = reminder_list(page, 38, 142);
   for (i = 0; i < REMINDER_MAX; i++)
     {
       row = lv_obj_create(sc);
-      lv_obj_set_size(row, 292, 26);
+      lv_obj_set_size(row, 292, 32);
       lv_obj_set_style_bg_color(row, lv_color_hex(C_BTN), LV_PART_MAIN);
       lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
-      lv_obj_set_style_radius(row, 8, LV_PART_MAIN);
+      lv_obj_set_style_radius(row, 10, LV_PART_MAIN);
       lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
-      lv_obj_set_style_pad_all(row, 3, LV_PART_MAIN);
+      lv_obj_set_style_pad_all(row, 4, LV_PART_MAIN);
       lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
       lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
       lv_obj_add_event_cb(row, reminder_select, LV_EVENT_CLICKED,
@@ -790,42 +860,90 @@ void dm_create_reminders(void)
       s_alarm_text[i] = dm_lbl(row, "", "", g_dm_font_s, C_INK);
       lv_obj_set_width(s_alarm_text[i], 280);
       lv_label_set_long_mode(s_alarm_text[i], LV_LABEL_LONG_DOT);
-      lv_obj_set_pos(s_alarm_text[i], 3, 3);
+      lv_obj_set_pos(s_alarm_text[i], 3, 5);
       s_alarm_rows[i] = row;
       lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
     }
 
-  s_alarm_time = dm_lbl(page, "07:00", "07:00", g_dm_font_l, C_ACCENT);
-  lv_obj_set_width(s_alarm_time, 110);
-  lv_obj_set_style_text_align(s_alarm_time, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-  lv_obj_align(s_alarm_time, LV_ALIGN_TOP_MID, 0, 126);
-  button = dm_btn(page, "−时", "-H", 54, 22, C_BTN, C_INK,
-                  alarm_adjust_cb, (void *)(intptr_t)-1);
-  lv_obj_set_pos(button, 10, 154);
-  button = dm_btn(page, "＋时", "+H", 54, 22, C_BTN, C_INK,
-                  alarm_adjust_cb, (void *)(intptr_t)1);
-  lv_obj_set_pos(button, 68, 154);
-  button = dm_btn(page, "−分", "-M", 54, 22, C_BTN, C_INK,
-                  alarm_adjust_cb, (void *)(intptr_t)-5);
-  lv_obj_set_pos(button, 198, 154);
-  button = dm_btn(page, "＋分", "+M", 54, 22, C_BTN, C_INK,
-                  alarm_adjust_cb, (void *)(intptr_t)5);
-  lv_obj_set_pos(button, 256, 154);
+  s_alarm_empty = dm_lbl(page, "暂无内容", "No alarms yet", g_dm_font_l,
+                         MD_ON_SURFACE);
+  lv_obj_set_width(s_alarm_empty, 300);
+  lv_obj_set_style_text_align(s_alarm_empty, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_pos(s_alarm_empty, 10, 82);
+  s_alarm_empty_add = dm_btn(page, "＋  点击添加", "+  Add alarm", 180, 46,
+                             MD_PRIMARY, MD_ON_PRIMARY,
+                             alarm_open_add_cb, NULL);
+  lv_obj_set_style_radius(s_alarm_empty_add, 23, LV_PART_MAIN);
+  lv_obj_align(s_alarm_empty_add, LV_ALIGN_TOP_MID, 0, 128);
+  s_alarm_delete = dm_btn(page, "删除", "Delete", 76, 34,
+                          MD_ERROR, C_INK, alarm_delete_cb, NULL);
+  lv_obj_set_pos(s_alarm_delete, 22, 194);
+  lv_obj_add_flag(s_alarm_delete, LV_OBJ_FLAG_HIDDEN);
+  s_alarm_plus = dm_btn(page, "+", "+", 48, 40,
+                        MD_PRIMARY, MD_ON_PRIMARY, alarm_open_add_cb, NULL);
+  lv_obj_set_style_radius(s_alarm_plus, 20, LV_PART_MAIN);
+  lv_obj_align(s_alarm_plus, LV_ALIGN_TOP_MID, 0, 190);
+  lv_obj_add_flag(s_alarm_plus, LV_OBJ_FLAG_HIDDEN);
 
-  s_alarm_repeat_btn = dm_btn(page, "单次", "Once", 132, 22, C_BTN,
-                              C_STAR, alarm_repeat_cb, NULL);
-  lv_obj_align(s_alarm_repeat_btn, LV_ALIGN_TOP_MID, 0, 179);
+  page = lv_obj_create(g_dm_root);
+  lv_obj_set_size(page, DM_SCR_W, DM_SCR_H);
+  lv_obj_set_pos(page, 0, 0);
+  lv_obj_set_style_bg_color(page, lv_color_hex(MD_SURFACE), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(page, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(page, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(page, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+  g_dm_pages[PAGE_ALARM_ADD] = page;
+  button = dm_btn(page, "←", "<", 36, 26, MD_SURFACE_HIGH,
+                  MD_ON_SURFACE, alarm_form_back_cb, NULL);
+  lv_obj_set_pos(button, 8, 6);
+  label = dm_lbl(page, "新建闹钟", "New alarm", g_dm_font_m, MD_ON_SURFACE);
+  lv_obj_set_pos(label, 54, 8);
+  label = dm_lbl(page, "设置响铃时间", "Set alarm time", g_dm_font_s,
+                 MD_ON_SURFACE_VARIANT);
+  lv_obj_set_width(label, 300);
+  lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_pos(label, 10, 40);
+
+  time_panel = lv_obj_create(page);
+  lv_obj_set_size(time_panel, 260, 54);
+  lv_obj_align(time_panel, LV_ALIGN_TOP_MID, 0, 62);
+  lv_obj_set_style_bg_color(time_panel, lv_color_hex(MD_SURFACE_CONTAINER),
+                            LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(time_panel, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(time_panel, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(time_panel, 16, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(time_panel, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(time_panel, LV_OBJ_FLAG_SCROLLABLE);
+  s_alarm_time = dm_lbl(time_panel, "07:00", "07:00", g_dm_font_xl, MD_ON_SURFACE);
+  lv_obj_set_width(s_alarm_time, 240);
+  lv_obj_set_style_text_align(s_alarm_time, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_align(s_alarm_time, LV_ALIGN_CENTER, 0, 0);
+
+  button = dm_btn(page, "− 时", "- hour", 62, 28, MD_SURFACE_HIGH,
+                  MD_ON_SURFACE, alarm_adjust_cb, (void *)(intptr_t)-1);
+  lv_obj_set_pos(button, 10, 124);
+  button = dm_btn(page, "＋ 时", "+ hour", 62, 28, MD_SURFACE_HIGH,
+                  MD_ON_SURFACE, alarm_adjust_cb, (void *)(intptr_t)1);
+  lv_obj_set_pos(button, 78, 124);
+  button = dm_btn(page, "− 分", "- min", 62, 28, MD_SURFACE_HIGH,
+                  MD_ON_SURFACE, alarm_adjust_cb, (void *)(intptr_t)-60);
+  lv_obj_set_pos(button, 180, 124);
+  button = dm_btn(page, "＋ 分", "+ min", 62, 28, MD_SURFACE_HIGH,
+                  MD_ON_SURFACE, alarm_adjust_cb, (void *)(intptr_t)60);
+  lv_obj_set_pos(button, 248, 124);
+
+  s_alarm_repeat_btn = dm_btn(page, "单次", "Once", 140, 30,
+                              MD_SURFACE_HIGH, C_STAR, alarm_repeat_cb, NULL);
+  lv_obj_align(s_alarm_repeat_btn, LV_ALIGN_TOP_MID, 0, 160);
   s_alarm_repeat_label = lv_obj_get_child(s_alarm_repeat_btn, 0);
-  s_alarm_hint = dm_lbl(page, "", "", g_dm_font_s, C_DIM);
+  s_alarm_hint = dm_lbl(page, "", "", g_dm_font_s, MD_ON_SURFACE_VARIANT);
   lv_obj_set_width(s_alarm_hint, 300);
   lv_obj_set_style_text_align(s_alarm_hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-  lv_obj_set_pos(s_alarm_hint, 10, 202);
-  button = dm_btn(page, "添加闹钟", "Add alarm", 142, 20, C_ACCENT, C_EYE,
-                  alarm_add_cb, NULL);
-  lv_obj_set_pos(button, 10, 219);
-  button = dm_btn(page, "删除选中", "Delete", 142, 20, C_BTN, C_INK,
-                  alarm_delete_cb, NULL);
-  lv_obj_set_pos(button, 168, 219);
+  lv_obj_set_pos(s_alarm_hint, 10, 190);
+  button = dm_btn(page, "保存闹钟", "Save alarm", 180, 26,
+                  MD_PRIMARY, MD_ON_PRIMARY, alarm_add_cb, NULL);
+  lv_obj_align(button, LV_ALIGN_TOP_MID, 0, 208);
 
   s_alert = lv_obj_create(g_dm_root);
   lv_obj_set_size(s_alert, DM_SCR_W, DM_SCR_H);
@@ -835,6 +953,7 @@ void dm_create_reminders(void)
   lv_obj_set_style_border_width(s_alert, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(s_alert, 0, LV_PART_MAIN);
   lv_obj_clear_flag(s_alert, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(s_alert, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(s_alert, LV_OBJ_FLAG_HIDDEN);
   s_alert_title = dm_lbl(s_alert, "提醒", "Reminder", g_dm_font_l, C_ACCENT);
   lv_obj_set_width(s_alert_title, 300);
@@ -870,8 +989,8 @@ static void alarm_adjust_cb(lv_event_t *e)
   int code = (int)(intptr_t)lv_event_get_user_data(e);
   if (code == 1) s_alarm_hour = (s_alarm_hour + 1) % 24;
   else if (code == -1) s_alarm_hour = (s_alarm_hour + 23) % 24;
-  else if (code == 5) s_alarm_minute = (s_alarm_minute + 5) % 60;
-  else if (code == -5) s_alarm_minute = (s_alarm_minute + 55) % 60;
+  else if (code == 60) s_alarm_minute = (s_alarm_minute + 1) % 60;
+  else if (code == -60) s_alarm_minute = (s_alarm_minute + 59) % 60;
   alarm_time_paint();
 }
 
@@ -888,11 +1007,12 @@ static void alarm_add_cb(lv_event_t *e)
   time_t now = time(NULL);
   struct tm tmv;
   (void)e;
-  if (!localtime_r(&now, &tmv))
+  if (!localtime_r(&now, &tmv) || tmv.tm_year + 1900 < 2024)
     {
-      if (s_alarm_hint) lv_label_set_text(s_alarm_hint, "设备时间不可用");
+      if (s_alarm_hint) lv_label_set_text(s_alarm_hint, "请先校准设备时间");
       return;
     }
+  tmv.tm_sec = 0;
   if (!s_alarm_repeat &&
       (s_alarm_hour < tmv.tm_hour ||
        (s_alarm_hour == tmv.tm_hour && s_alarm_minute <= tmv.tm_min)))
@@ -902,13 +1022,19 @@ static void alarm_add_cb(lv_event_t *e)
   rc = dm_alarm_add_voice("闹钟", tmv.tm_year + 1900, tmv.tm_mon + 1,
                           tmv.tm_mday, s_alarm_hour, s_alarm_minute,
                           s_alarm_repeat);
+  if (rc == 0)
+    {
+      s_alarm_sel = -1;
+      reminder_paint();
+      dm_show(PAGE_ALARM);
+      return;
+    }
   if (s_alarm_hint)
     {
-      lv_label_set_text(s_alarm_hint, rc == 0 ? "闹钟已保存" :
-                        (rc == -2 ? "闹钟数量已满" :
-                         (rc == -4 ? "请先校准设备时间" : "设置失败")));
+      lv_label_set_text(s_alarm_hint,
+                        rc == -2 ? "闹钟数量已满" :
+                        rc == -4 ? "请先校准设备时间" : "设置失败");
     }
-  reminder_paint();
 }
 
 void dm_reminder_tick(void)

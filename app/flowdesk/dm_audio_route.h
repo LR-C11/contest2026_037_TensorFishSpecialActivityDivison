@@ -1,5 +1,5 @@
 /*
- * dm_audio_route.h — output channel: speaker / BT headset / auto
+ * dm_audio_route.h — output channel: speaker / auto
  */
 #ifndef DM_AUDIO_ROUTE_H
 #define DM_AUDIO_ROUTE_H

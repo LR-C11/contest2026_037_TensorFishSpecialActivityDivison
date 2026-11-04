@@ -30,9 +30,9 @@
 #include <nuttx/audio/audio.h>
 #include <netutils/cJSON.h>
 
-#define VOICE_BASE   "https://token-plan-ams.xiaomimimo.com/v1"
+#define VOICE_BASE   "https://token-plan-sgp.xiaomimimo.com/v1"
 #define MIMO_KEY_PATH "/data/deskmate_mimo.key"
-#define MIMO_EMBEDDED_KEY "tp-eppq7fbdtkkjxvmvaxl164qjyrvafhh0zofftfz7t6b85iah"
+#define MIMO_EMBEDDED_KEY "tp-simy1sj9m4td099i6utgbahxor4d1wvmyodrfy3yahia4sv5"
 #define MIMO_CURL_CONFIG "/tmp/dm_voice_mimo.conf"
 #define ASR_MODEL    "mimo-v2.5-asr"
 #define TTS_MODEL    "mimo-v2.5-tts"
@@ -53,14 +53,26 @@
 #define REC_RATE     8000
 #define REC_BITS     16
 #define REC_CH       1
-#define REC_MAX_SEC  8
+#define REC_MAX_SEC  600
+#define VOICE_MAX_RECORD_SEC 600
+#define VOICE_MAX_RECORD_BYTES \
+  ((uint32_t)REC_RATE * REC_CH * REC_BITS / 8 * VOICE_MAX_RECORD_SEC)
 #define VOICE_WIFI_WAIT_SEC 20
+#define MEETING_ASR_SEGMENT_SEC 20
+#define MEETING_ASR_SEGMENT_BYTES \
+  ((uint32_t)REC_RATE * REC_CH * REC_BITS / 8 * MEETING_ASR_SEGMENT_SEC)
+#define MEETING_CHUNK_WAV "/tmp/dm_meeting_asr_chunk.wav"
+#define MEETING_CHAT_RSP "/tmp/dm_meeting_chat_rsp.json"
+#define MEETING_SUMMARY_MODEL CHAT_MODEL
 
 static volatile dm_voice_state_t s_st = DM_VOICE_IDLE;
 static volatile int s_rec_active;
 static pthread_mutex_t s_rec_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t s_audio_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t s_voice_api_lock = PTHREAD_MUTEX_INITIALIZER;
+static int s_meeting_progress_done;
+static int s_meeting_progress_total;
+static pthread_mutex_t s_meeting_progress_lock = PTHREAD_MUTEX_INITIALIZER;
 static int s_speaker_vol = 80; /* percent */
 static volatile dm_voice_failure_t s_last_failure = DM_VOICE_FAILURE_NONE;
 
@@ -93,7 +105,16 @@ int dm_voice_mic_available(void)
 
 int dm_voice_rec_active(void)
 {
-  return s_rec_active;
+  int active;
+
+  /* This is polled by the LVGL tick; do not wait behind recorder stop/join. */
+  if (pthread_mutex_trylock(&s_rec_lock) != 0)
+    {
+      return 1;
+    }
+  active = s_rec_active;
+  pthread_mutex_unlock(&s_rec_lock);
+  return active;
 }
 
 /* ---------- recorder: nxrecorder (buffer-queue API) ----------
@@ -136,9 +157,9 @@ int dm_voice_rec_start(int max_seconds)
     {
       max_seconds = REC_MAX_SEC;
     }
-  if (max_seconds > 300)
+  if (max_seconds > VOICE_MAX_RECORD_SEC)
     {
-      max_seconds = 300;
+      max_seconds = VOICE_MAX_RECORD_SEC;
     }
 
   pthread_mutex_lock(&s_rec_lock);
@@ -313,7 +334,7 @@ int dm_voice_rec_stop(void)
  * particular, do not send 8 kHz mono recorder data or 24 kHz mono preview
  * files directly to the speaker endpoint. */
 #define SPEAKER_RATE 16000
-#define WAV_INPUT_MAX (4 * 1024 * 1024)
+#define WAV_INPUT_MAX (12 * 1024 * 1024)
 
 static uint16_t voice_get_le16(const uint8_t *p)
 {
@@ -572,10 +593,10 @@ static int play_wav(const char *path)
    * through the normalized PCM duration and join before another stream opens. */
   {
     uint64_t play_ms = out_frames * 1000 / SPEAKER_RATE + 200;
-    /* Permit a full 30-second recording plus playback completion margin. */
-    if (play_ms > 35000)
+    /* Permit a full ten-minute recording plus playback completion margin. */
+    if (play_ms > 605000)
       {
-        play_ms = 35000;
+        play_ms = 605000;
       }
     while (play_ms >= 1000)
       {
@@ -604,6 +625,7 @@ out:
     {
       nxplayer_release(p);
     }
+  unlink(PCM_RAW);
   if (rc != 0)
     {
       syslog(LOG_WARNING, "[dm-voice] playback failed at %s\n", failed_at);
@@ -1171,7 +1193,7 @@ static int voice_prepare_wav(const char *src, const char **wav_out)
     }
 
   if (fseek(in, 0, SEEK_END) != 0 || (size = ftell(in)) <= 0 ||
-      size > 2 * 1024 * 1024 - 44 || fseek(in, 0, SEEK_SET) != 0)
+      size > VOICE_MAX_RECORD_BYTES || fseek(in, 0, SEEK_SET) != 0)
     {
       fclose(in);
       return -1;
@@ -1237,7 +1259,7 @@ static int voice_prepare_wav(const char *src, const char **wav_out)
  * not leave a partial file masquerading as a completed recording. */
 int dm_voice_record_save(const char *wav_path)
 {
-  const char *prepared_path;
+  const char *prepared_path = NULL;
   char temp_path[160];
   FILE *in = NULL;
   FILE *out = NULL;
@@ -1316,6 +1338,11 @@ out:
   else
     {
       syslog(LOG_INFO, "[dm-voice] saved recording to persistent storage\n");
+      if (prepared_path && strcmp(prepared_path, WAV_ASR) == 0)
+        {
+          unlink(WAV_ASR);
+        }
+      unlink(WAV_REC);
     }
   pthread_mutex_unlock(&s_voice_api_lock);
   return rc;
@@ -1414,6 +1441,13 @@ static int asr_wav(const char *wav, char *text, int cap)
   content = message ? cJSON_GetObjectItem(message, "content") : NULL;
   if (content && cJSON_IsString(content) && content->valuestring)
     {
+      size_t content_len = strlen(content->valuestring);
+      if (content_len >= (size_t)cap)
+        {
+          cJSON_Delete(root);
+          syslog(LOG_ERR, "[dm-voice] ASR segment text exceeds buffer\n");
+          return -ENOSPC;
+        }
       snprintf(text, (size_t)cap, "%s", content->valuestring);
     }
   cJSON_Delete(root);
@@ -1496,9 +1530,9 @@ static int chat_reply(const char *user, char *out, int cap)
 static int tts_synth(const char *text, const char *wav_path,
                      const char *voice_id)
 {
-  char esc[400];
+  char esc[1200];
   char voice_esc[64];
-  char body[1000];
+  char body[2400];
   unsigned char *raw = NULL;
   FILE *f = NULL;
   long sz;
@@ -1751,6 +1785,353 @@ int dm_voice_tts_play(const char *text)
 
   pthread_mutex_lock(&s_voice_api_lock);
   rc = voice_tts_play_unlocked(text);
+  pthread_mutex_unlock(&s_voice_api_lock);
+  return rc;
+}
+
+static void voice_meeting_progress_set(int completed, int total)
+{
+  pthread_mutex_lock(&s_meeting_progress_lock);
+  s_meeting_progress_done = completed;
+  s_meeting_progress_total = total;
+  pthread_mutex_unlock(&s_meeting_progress_lock);
+}
+
+void dm_voice_meeting_progress(int *completed, int *total)
+{
+  pthread_mutex_lock(&s_meeting_progress_lock);
+  if (completed) *completed = s_meeting_progress_done;
+  if (total) *total = s_meeting_progress_total;
+  pthread_mutex_unlock(&s_meeting_progress_lock);
+}
+
+static int meeting_write_wav_header(FILE *out, uint32_t data_size)
+{
+  uint8_t header[44];
+  uint32_t byte_rate = REC_RATE * REC_CH * REC_BITS / 8;
+
+  memset(header, 0, sizeof(header));
+  memcpy(header, "RIFF", 4);
+  put_le32(header + 4, data_size + 36);
+  memcpy(header + 8, "WAVEfmt ", 8);
+  put_le32(header + 16, 16);
+  put_le16(header + 20, 1);
+  put_le16(header + 22, REC_CH);
+  put_le32(header + 24, REC_RATE);
+  put_le32(header + 28, byte_rate);
+  put_le16(header + 32, REC_CH * REC_BITS / 8);
+  put_le16(header + 34, REC_BITS);
+  memcpy(header + 36, "data", 4);
+  put_le32(header + 40, data_size);
+  return fwrite(header, 1, sizeof(header), out) == sizeof(header) ? 0 : -EIO;
+}
+
+static int meeting_asr_transcribe(const char *wav_path, char *transcript,
+                                  size_t transcript_cap)
+{
+  FILE *in = NULL;
+  uint16_t channels;
+  uint16_t bits;
+  uint32_t rate;
+  uint32_t data_size;
+  uint32_t aligned_size;
+  uint32_t offset;
+  long data_offset;
+  uint32_t segment_index;
+  uint32_t segment_count;
+  size_t transcript_used = 0;
+  char segment_text[1024];
+  char copybuf[4096];
+  int rc = -1;
+
+  if (!wav_path || !transcript || transcript_cap < 2)
+    {
+      return -EINVAL;
+    }
+  transcript[0] = '\0';
+  in = fopen(wav_path, "rb");
+  if (!in)
+    {
+      return -errno;
+    }
+  if (voice_wav_find_data(in, &channels, &rate, &bits, &data_offset,
+                          &data_size) != 0 || channels != REC_CH ||
+      rate != REC_RATE || bits != REC_BITS ||
+      data_size > VOICE_MAX_RECORD_BYTES)
+    {
+      syslog(LOG_ERR, "[dm-voice] meeting WAV format/size unsupported\n");
+      goto out;
+    }
+
+  aligned_size = data_size - data_size % (REC_CH * REC_BITS / 8);
+  if (aligned_size == 0)
+    {
+      goto out;
+    }
+  segment_count = (aligned_size + MEETING_ASR_SEGMENT_BYTES - 1) /
+                  MEETING_ASR_SEGMENT_BYTES;
+  voice_meeting_progress_set(0, (int)segment_count + 2);
+
+  for (segment_index = 0, offset = 0; offset < aligned_size;
+       segment_index++)
+    {
+      FILE *chunk = NULL;
+      uint32_t chunk_size = aligned_size - offset;
+      uint32_t copied = 0;
+
+      if (chunk_size > MEETING_ASR_SEGMENT_BYTES)
+        {
+          chunk_size = MEETING_ASR_SEGMENT_BYTES;
+        }
+      if (fseek(in, data_offset + (long)offset, SEEK_SET) != 0)
+        {
+          goto out;
+        }
+      chunk = fopen(MEETING_CHUNK_WAV, "wb");
+      if (!chunk)
+        {
+          goto out;
+        }
+      if (meeting_write_wav_header(chunk, chunk_size) != 0)
+        {
+          fclose(chunk);
+          unlink(MEETING_CHUNK_WAV);
+          goto out;
+        }
+      while (copied < chunk_size)
+        {
+          size_t want = chunk_size - copied;
+          size_t got;
+          if (want > sizeof(copybuf)) want = sizeof(copybuf);
+          got = fread(copybuf, 1, want, in);
+          if (got != want || fwrite(copybuf, 1, got, chunk) != got)
+            {
+              fclose(chunk);
+              unlink(MEETING_CHUNK_WAV);
+              goto out;
+            }
+          copied += (uint32_t)got;
+        }
+      if (fclose(chunk) != 0)
+        {
+          unlink(MEETING_CHUNK_WAV);
+          goto out;
+        }
+
+      if (asr_wav(MEETING_CHUNK_WAV, segment_text,
+                  sizeof(segment_text)) != 0)
+        {
+          unlink(MEETING_CHUNK_WAV);
+          goto out;
+        }
+      unlink(MEETING_CHUNK_WAV);
+      if (segment_text[0])
+        {
+          size_t n = strlen(segment_text);
+          size_t separator = transcript_used ? 1 : 0;
+          if (transcript_used + separator + n >= transcript_cap)
+            {
+              rc = -ENOSPC;
+              goto out;
+            }
+          if (separator)
+            {
+              transcript[transcript_used++] = '\n';
+            }
+          memcpy(transcript + transcript_used, segment_text, n);
+          transcript_used += n;
+          transcript[transcript_used] = '\0';
+        }
+      offset += chunk_size;
+      voice_meeting_progress_set((int)segment_index + 1,
+                                 (int)segment_count + 2);
+    }
+
+  rc = transcript_used ? 0 : -EIO;
+
+out:
+  unlink(MEETING_CHUNK_WAV);
+  if (in) fclose(in);
+  return rc;
+}
+
+static int meeting_summary_reply(const char *transcript, char *summary,
+                                 size_t summary_cap)
+{
+  static const char system_prompt[] =
+               "你是严谨的会议纪要助手。只依据ASR转写，不推测或补造信息。用中文依次输出主题概述、关键结论、待办事项；负责人和截止时间只在转写明确提及时记录，不确定内容标注待确认。重点精炼，整体控制在约150个汉字内，适合屏幕阅读和语音播报。";
+  static const char user_prefix[] = "请整理以下会议逐段转写，合并重复内容并保留重点：\\n\\n";
+  size_t transcript_len;
+  size_t escaped_cap;
+  size_t body_cap;
+  char *escaped = NULL;
+  char *body = NULL;
+  int n;
+  cJSON *root = NULL;
+  cJSON *message;
+  cJSON *content;
+  int rc = -1;
+
+  if (!transcript || !transcript[0] || !summary || summary_cap < 2)
+    {
+      return -EINVAL;
+    }
+  summary[0] = '\0';
+  transcript_len = strlen(transcript);
+  if (transcript_len > (SIZE_MAX - 1) / 2)
+    {
+      return -EOVERFLOW;
+    }
+  escaped_cap = transcript_len * 2 + 1;
+  body_cap = escaped_cap + sizeof(system_prompt) + sizeof(user_prefix) + 512;
+  escaped = malloc(escaped_cap);
+  body = malloc(body_cap);
+  if (!escaped || !body)
+    {
+      rc = -ENOMEM;
+      goto out;
+    }
+  if (json_escape(transcript, escaped, escaped_cap) < 0)
+    {
+      rc = -ENOSPC;
+      goto out;
+    }
+  n = snprintf(body, body_cap,
+               "{\"model\":\"%s\",\"messages\":["
+               "{\"role\":\"system\",\"content\":\"%s\"},"
+               "{\"role\":\"user\",\"content\":\"%s%s\"}],"
+               "\"max_completion_tokens\":1200,"
+               "\"thinking\":{\"type\":\"disabled\"}}",
+               MEETING_SUMMARY_MODEL, system_prompt, user_prefix, escaped);
+  if (n <= 0 || (size_t)n >= body_cap)
+    {
+      rc = -ENOSPC;
+      goto out;
+    }
+  if (http_post_json("/chat/completions", body, MEETING_CHAT_RSP) != 0)
+    {
+      goto out;
+    }
+  root = voice_json_load(MEETING_CHAT_RSP, 256 * 1024);
+  if (!root)
+    {
+      goto out;
+    }
+  message = voice_first_message(root);
+  content = message ? cJSON_GetObjectItem(message, "content") : NULL;
+  if (!content || !cJSON_IsString(content) || !content->valuestring ||
+      !content->valuestring[0])
+    {
+      goto out;
+    }
+  if (strlen(content->valuestring) >= summary_cap)
+    {
+      rc = -ENOSPC;
+      goto out;
+    }
+  snprintf(summary, summary_cap, "%s", content->valuestring);
+  rc = 0;
+
+out:
+  if (root) cJSON_Delete(root);
+  free(escaped);
+  free(body);
+  return rc;
+}
+
+static void meeting_speech_excerpt(const char *summary, char *speech,
+                                   size_t speech_cap)
+{
+  static const char prefix[] = "会议摘要。";
+  size_t prefix_len = sizeof(prefix) - 1;
+  size_t source_len;
+  size_t keep;
+
+  if (!speech || speech_cap == 0)
+    {
+      return;
+    }
+  speech[0] = '\0';
+  if (!summary || !summary[0] || prefix_len >= speech_cap)
+    {
+      return;
+    }
+  source_len = strlen(summary);
+  keep = source_len;
+  if (keep > speech_cap - prefix_len - 1)
+    {
+      keep = speech_cap - prefix_len - 1;
+    }
+  if (keep > 500) keep = 500;
+  while (keep > 0 && (((unsigned char)summary[keep] & 0xc0) == 0x80))
+    {
+      keep--;
+    }
+  memcpy(speech, prefix, prefix_len);
+  memcpy(speech + prefix_len, summary, keep);
+  speech[prefix_len + keep] = '\0';
+}
+
+int dm_voice_meeting_analyze(const char *wav_path,
+                             char *transcript, int transcript_cap,
+                             char *summary, int summary_cap)
+{
+  char speech[600];
+  int rc;
+  int tts_rc;
+  int progress_total;
+
+  if (!wav_path || !transcript || transcript_cap < 2 || !summary ||
+      summary_cap < 2)
+    {
+      return -EINVAL;
+    }
+  transcript[0] = '\0';
+  summary[0] = '\0';
+  voice_meeting_progress_set(0, 0);
+  pthread_mutex_lock(&s_voice_api_lock);
+  s_last_failure = DM_VOICE_FAILURE_NONE;
+  s_st = DM_VOICE_ASR;
+  rc = meeting_asr_transcribe(wav_path, transcript, (size_t)transcript_cap);
+  if (rc != 0)
+    {
+      if (s_last_failure == DM_VOICE_FAILURE_NONE)
+        s_last_failure = DM_VOICE_FAILURE_ASR;
+      goto out;
+    }
+
+  s_st = DM_VOICE_CHAT;
+  rc = meeting_summary_reply(transcript, summary, (size_t)summary_cap);
+  if (rc != 0)
+    {
+      if (s_last_failure == DM_VOICE_FAILURE_NONE)
+        s_last_failure = DM_VOICE_FAILURE_CHAT;
+      goto out;
+    }
+  dm_voice_meeting_progress(NULL, &progress_total);
+  if (progress_total > 0)
+    {
+      voice_meeting_progress_set(progress_total - 1, progress_total);
+    }
+
+  meeting_speech_excerpt(summary, speech, sizeof(speech));
+  s_st = DM_VOICE_TTS;
+  tts_rc = voice_tts_play_unlocked(speech);
+  dm_voice_meeting_progress(NULL, &progress_total);
+  voice_meeting_progress_set(progress_total, progress_total);
+  if (tts_rc != 0)
+    {
+      if (s_last_failure == DM_VOICE_FAILURE_NONE)
+        s_last_failure = DM_VOICE_FAILURE_TTS;
+      rc = 1; /* transcript and summary remain successful and should be saved */
+    }
+  else
+    {
+      rc = 0;
+    }
+
+out:
+  s_st = DM_VOICE_IDLE;
   pthread_mutex_unlock(&s_voice_api_lock);
   return rc;
 }

@@ -15,9 +15,9 @@
 #ifdef CONFIG_DESKMATE_APP
 
 /* MiMo OpenAI-compatible endpoint. Store the rotated key only on-device. */
-#define MIMO_BASE "https://token-plan-ams.xiaomimimo.com/v1"
+#define MIMO_BASE "https://token-plan-sgp.xiaomimimo.com/v1"
 #define MIMO_KEY_PATH "/data/deskmate_mimo.key"
-#define MIMO_EMBEDDED_KEY "tp-eppq7fbdtkkjxvmvaxl164qjyrvafhh0zofftfz7t6b85iah"
+#define MIMO_EMBEDDED_KEY "tp-simy1sj9m4td099i6utgbahxor4d1wvmyodrfy3yahia4sv5"
 #define MIMO_CURL_CONFIG "/tmp/dm_chat_mimo.conf"
 #define MIMO_MODEL "mimo-v2.6-flash"
 #define CHAT_REQ_PATH "/tmp/dm_chat_req.json"

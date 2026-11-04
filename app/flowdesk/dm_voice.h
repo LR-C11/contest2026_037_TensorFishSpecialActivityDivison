@@ -10,6 +10,8 @@
  * callbacks; this is separate from handling transport/formatting failures. */
 #define DM_VOICE_NET_WORKER_STACK 65536
 #define DM_VOICE_RECORD_PATH "/data/flowdesk_recording.wav"
+#define DM_VOICE_MEETING_TRANSCRIPT_MAX 12288
+#define DM_VOICE_MEETING_SUMMARY_MAX 2048
 
 typedef enum {
   DM_VOICE_FAILURE_NONE = 0,
@@ -43,6 +45,12 @@ int dm_voice_rec_active(void);
 /* 0=spoken reply, 1=text-only reply, <0=ASR/chat failed. */
 int dm_voice_asr_chat_tts(const char *wav_path, char *reply, int reply_cap);
 int dm_voice_tts_play(const char *text);
+/* Analyze a locally saved meeting WAV. Returns 0 when spoken, 1 when the
+ * transcript/summary succeeded but TTS failed, and negative on analysis failure. */
+int dm_voice_meeting_analyze(const char *wav_path,
+                             char *transcript, int transcript_cap,
+                             char *summary, int summary_cap);
+void dm_voice_meeting_progress(int *completed, int *total);
 int dm_voice_profile_preview(int profile_idx); /* generates/caches once per voice */
 int dm_voice_play_file(const char *wav_path); /* schedules local WAV playback */
 int dm_voice_play_file_sync(const char *wav_path); /* blocking; worker only */

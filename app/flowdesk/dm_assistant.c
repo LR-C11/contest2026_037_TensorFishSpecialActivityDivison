@@ -25,6 +25,9 @@ typedef enum
   INTENT_COUNTDOWN,
   INTENT_NOTE,
   INTENT_MOOD,
+  INTENT_MOOD_RECORD,
+  INTENT_MED_TAKE,
+  INTENT_MBTI_OPEN,
   INTENT_WAKE,
   INTENT_GAME_ASK,
   INTENT_GAME,
@@ -886,6 +889,93 @@ static int is_wake_phrase(const char *text)
          (ascii_contains_ci(text, "hello") && mentions_openvela);
 }
 
+static int is_mbti_open_request(const char *text)
+{
+  static const char *const targets[] = {
+    "mbti", "人格测试", "性格测试", "人格类型测试"
+  };
+  static const char *const actions[] = {
+    "打开", "进入", "开始", "启动", "做", "测", "测试"
+  };
+  static const char *const questions[] = {
+    "是什么意思", "是什么", "代表什么", "有什么含义"
+  };
+  int has_target = ascii_contains_ci(text, "mbti") ||
+      contains_any(text, targets + 1,
+                   sizeof(targets) / sizeof(targets[0]) - 1);
+
+  if (!has_target || contains_any(text, questions,
+                                  sizeof(questions) / sizeof(questions[0])))
+    {
+      return 0;
+    }
+  return contains_any(text, actions, sizeof(actions) / sizeof(actions[0]));
+}
+
+static int is_med_take_request(const char *text)
+{
+  static const char *const completed_words[] = {
+    "吃了", "吃过", "吃完药", "吃药了", "服了", "服过", "服用过",
+    "已服", "已吃", "已经吃", "已经服", "刚吃", "刚刚吃",
+    "刚服", "刚刚服", "服药了", "服完药"
+  };
+  static const char *const context_words[] = {
+    "药", "用药", "服用", "维生素", "胶囊", "药丸", "药水",
+    "药品", "药物", "阿莫西林", "阿司匹林", "胰岛素"
+  };
+  static const char *const negated_words[] = {
+    "没吃", "没有吃", "未吃", "没服", "没有服", "未服", "还没吃",
+    "还没有吃", "还没服", "还没有服", "不吃", "不服", "漏服",
+    "忘记吃", "忘了吃", "忘记服", "忘了服", "准备吃", "准备服",
+    "要吃药", "要服药", "该吃药", "该服药", "记得吃药", "记得服药"
+  };
+  static const char *const question_words[] = {
+    "吗", "有没有", "是否", "是不是", "要不要", "该不该", "？", "?"
+  };
+  static const char *const self_markers[] = {
+    "我", "刚", "刚才", "刚刚", "已经", "已"
+  };
+  size_t i;
+
+  if (contains_any(text, negated_words,
+                   sizeof(negated_words) / sizeof(negated_words[0])) ||
+      contains_any(text, question_words,
+                   sizeof(question_words) / sizeof(question_words[0])))
+    {
+      return 0;
+    }
+
+  for (i = 0; i < sizeof(completed_words) / sizeof(completed_words[0]); i++)
+    {
+      const char *action = strstr(text, completed_words[i]);
+      size_t action_len = strlen(completed_words[i]);
+      size_t j;
+      if (!action)
+        {
+          continue;
+        }
+      for (j = 0; j < sizeof(context_words) / sizeof(context_words[0]); j++)
+        {
+          const char *medicine = strstr(text, context_words[j]);
+          if (!medicine)
+            {
+              continue;
+            }
+          if ((medicine < action + action_len &&
+               medicine + strlen(context_words[j]) > action) ||
+              (medicine >= action + action_len &&
+               (size_t)(medicine - (action + action_len)) <= 6) ||
+              (action >= medicine + strlen(context_words[j]) &&
+               (size_t)(action - (medicine + strlen(context_words[j]))) <= 6))
+            {
+              return 1;
+            }
+        }
+    }
+  return contains_any(text, self_markers,
+                     sizeof(self_markers) / sizeof(self_markers[0]));
+}
+
 static dm_page_t game_page_from_text(const char *text)
 {
   if (strstr(text, "2048") || strstr(text, "二零四八") ||
@@ -1299,6 +1389,28 @@ static int parse_intent(const char *text, assistant_intent_t *intent)
     "难过", "伤心", "焦虑", "压力大", "很累", "疲惫", "孤独",
     "烦躁", "沮丧"
   };
+  static const char *const mood_state_words[] = {
+    "不开心", "不高兴", "心情不好", "心情差", "情绪低落", "难受",
+    "难过", "伤心", "焦虑", "压力大", "很累", "疲惫", "孤独",
+    "烦躁", "沮丧", "开心", "高兴", "愉快", "兴奋", "激动",
+    "自信", "期待", "满足", "满意", "感动", "平静", "平和",
+    "放松", "安心", "若有所思", "思考", "惊讶", "生气", "愤怒",
+    "恼火", "累", "困", "紧张", "担心", "不安", "孤单", "有压力",
+    "心情不错", "心情很好", "心情挺好", "心情一般", "感觉一般",
+    "一般般", "心平气和",
+    "坐立不安", "充满活力"
+  };
+  static const char *const mood_record_triggers[] = {
+    "记录心情", "记录一下心情", "记录一下我的心情", "记下心情",
+    "记一下心情", "记一下我的心情", "记录我的心情", "记下我的心情",
+    "保存心情", "保存我的心情", "心情记录", "打卡心情",
+    "帮我记心情", "帮我记录心情"
+  };
+  static const char *const mood_self_report[] = {
+    "我现在", "我今天", "今天我", "最近我", "我的心情", "我心情",
+    "我觉得", "我感觉", "今天感觉", "现在感觉", "我很", "我有点",
+    "我挺", "我好"
+  };
   static const char *const no_reminder[] = {
     "不要提醒", "别提醒", "不用提醒", "取消提醒", "不要闹钟", "取消闹钟"
   };
@@ -1414,6 +1526,18 @@ static int parse_intent(const char *text, assistant_intent_t *intent)
       return 1;
     }
 
+  if (is_med_take_request(text))
+    {
+      intent->type = INTENT_MED_TAKE;
+      snprintf(intent->text, sizeof(intent->text), "%s", text);
+      return 1;
+    }
+  if (is_mbti_open_request(text))
+    {
+      intent->type = INTENT_MBTI_OPEN;
+      return 1;
+    }
+
   game_page = game_page_from_text(text);
   if (game_page != PAGE_COUNT &&
       (is_game_request(text) || strstr(text, "玩") != NULL))
@@ -1430,6 +1554,16 @@ static int parse_intent(const char *text, assistant_intent_t *intent)
   if (is_wake_phrase(text))
     {
       intent->type = INTENT_WAKE;
+      return 1;
+    }
+
+  if (contains_any(text, mood_record_triggers,
+                   sizeof(mood_record_triggers) /
+                     sizeof(mood_record_triggers[0])))
+    {
+      intent->type = INTENT_MOOD_RECORD;
+      intent->seconds = 1;
+      snprintf(intent->text, sizeof(intent->text), "%s", text);
       return 1;
     }
 
@@ -1484,6 +1618,17 @@ static int parse_intent(const char *text, assistant_intent_t *intent)
     {
       intent->type = INTENT_FOCUS;
       intent->seconds = seconds;
+      return 1;
+    }
+
+  if (contains_any(text, mood_state_words,
+                   sizeof(mood_state_words) / sizeof(mood_state_words[0])) &&
+      contains_any(text, mood_self_report,
+                   sizeof(mood_self_report) / sizeof(mood_self_report[0])))
+    {
+      intent->type = INTENT_MOOD_RECORD;
+      intent->seconds = 0;
+      snprintf(intent->text, sizeof(intent->text), "%s", text);
       return 1;
     }
 
@@ -1661,6 +1806,16 @@ static int run_intent(const assistant_intent_t *intent, char *reply, size_t cap)
         snprintf(reply, cap, "%s", "你好呀，有什么事可以帮到你？");
         return 0;
 
+      case INTENT_MBTI_OPEN:
+        dm_show(PAGE_MBTI);
+        snprintf(reply, cap, "%s", "已打开 MBTI 测试，可以开始答题了。");
+        return 0;
+
+      case INTENT_MED_TAKE:
+        rc = dm_med_voice_take(intent->text, reply, (int)cap);
+        dm_show(PAGE_MED);
+        return rc == 0 ? 0 : -1;
+
       case INTENT_GAME_ASK:
         pthread_mutex_lock(&s_intent_lock);
         s_waiting_game_choice = 1;
@@ -1738,6 +1893,38 @@ static int run_intent(const assistant_intent_t *intent, char *reply, size_t cap)
             snprintf(reply, cap, "这条备忘没有保存成功，请再说短一点。");
           }
         return -1;
+
+      case INTENT_MOOD_RECORD:
+        rc = dm_health_record_mood_voice(intent->text);
+        if (rc == 0)
+          {
+            dm_show(PAGE_HEALTH);
+            if (intent->seconds == 0)
+              {
+                char advice[160];
+                dm_health_voice_advice(intent->text, advice, sizeof(advice));
+                snprintf(reply, cap, "记好了，心情已保存。%s", advice);
+              }
+            else
+              {
+                snprintf(reply, cap, "%s", "记好了，心情已保存到健康记录。");
+              }
+            return 0;
+          }
+        if (rc == -2)
+          {
+            snprintf(reply, cap, "%s", "心情记录没有保存成功，请稍后重试。");
+            return -1;
+          }
+        if (intent->seconds)
+          {
+            dm_show(PAGE_MOOD_LOG);
+            snprintf(reply, cap,
+                     "%s", "我打开了心情记录页，请选择当前心情后点保存。");
+            return 0;
+          }
+        dm_health_voice_advice(intent->text, reply, (int)cap);
+        return 0;
 
       case INTENT_MOOD:
         dm_health_voice_advice(intent->text, reply, (int)cap);

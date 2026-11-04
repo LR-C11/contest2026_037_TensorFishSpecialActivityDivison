@@ -104,6 +104,9 @@ typedef enum {
   PAGE_RECORDER,
   PAGE_TODO,
   PAGE_ALARM,
+  PAGE_ALARM_ADD,
+  PAGE_MEETING,
+  PAGE_MEETING_DETAIL,
   PAGE_COUNT
 } dm_page_t;
 
@@ -249,6 +252,8 @@ void dm_create_recorder(void);
 void dm_recorder_tick(void);
 void dm_create_reminders(void);
 void dm_reminder_tick(void);
+void dm_create_meeting(void);
+void dm_meeting_tick(void);
 int dm_todo_add_voice(const char *name, int delay_seconds);
 int dm_todo_add_at_voice(const char *name, int year, int month, int day,
                          int hour, int minute);
@@ -291,6 +296,7 @@ int dm_med_today_stats(int *sched_out, int *taken_out);
 int dm_word_today_n(void);
 int dm_sensor_last_th(float *t_c, float *h_pct);
 void dm_health_refresh(void);
+int dm_health_record_mood_voice(const char *text);
 int dm_health_score(void);
 void dm_health_voice_advice(const char *user_text, char *out, int cap);
 int dm_countdown_add_voice(const char *name, int year, int month, int day,
@@ -313,6 +319,7 @@ void dm_tools_tick(void);
 void dm_life_tick(void);
 void dm_fun_tick(void);
 void dm_med_tick(void);
+int dm_med_voice_take(const char *utterance, char *reply, int reply_cap);
 void dm_wifi_tick(void);
 void dm_appconn_tick(void);
 int dm_wifi_start_scan(void);

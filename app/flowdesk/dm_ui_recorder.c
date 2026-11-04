@@ -15,8 +15,9 @@
 #include <pthread.h>
 #include <time.h>
 #include <errno.h>
+#include <sys/stat.h>
 
-#define RECORDER_MAX_SEC       30
+#define RECORDER_MAX_SEC       600
 #define RECORDER_SLOT_COUNT    10
 #define RECORDER_STATE_PATH    "/data/flowdesk_recorder_state.txt"
 #define RECORDER_STATE_TMP     "/data/flowdesk_recorder_state.tmp"
@@ -33,6 +34,9 @@ typedef enum
 static lv_obj_t *s_page;
 static lv_obj_t *s_status;
 static lv_obj_t *s_elapsed;
+static lv_obj_t *s_slot_info;
+static lv_obj_t *s_progress_track;
+static lv_obj_t *s_progress_fill;
 static lv_obj_t *s_record_btn;
 static lv_obj_t *s_play_btn;
 static lv_obj_t *s_list;
@@ -208,19 +212,30 @@ static void recorder_scan_slots(void)
   FILE *f;
   int next_slot = -1;
   int i;
+  int newest_slot = -1;
+  int oldest_slot = -1;
+  time_t newest_time = 0;
+  time_t oldest_time = 0;
+  time_t slot_mtime[RECORDER_SLOT_COUNT];
   char path[64];
 
+  memset(slot_mtime, 0, sizeof(slot_mtime));
   s_slot_count = 0;
   s_selected_slot = -1;
   s_next_slot = 0;
 
   for (i = 0; i < RECORDER_SLOT_COUNT; i++)
     {
+      struct stat st;
       if (recorder_slot_path(i, path, sizeof(path)) == 0 &&
           recorder_wav_exists(path))
         {
           s_slot_exists[i] = 1;
           s_slot_count++;
+          if (stat(path, &st) == 0)
+            {
+              slot_mtime[i] = st.st_mtime;
+            }
         }
       else
         {
@@ -230,6 +245,15 @@ static void recorder_scan_slots(void)
 
   /* Keep recordings made by the previous single-file recorder visible. */
   recorder_copy_legacy_if_needed();
+  if (s_slot_exists[0] && slot_mtime[0] == 0 &&
+      recorder_slot_path(0, path, sizeof(path)) == 0)
+    {
+      struct stat st;
+      if (stat(path, &st) == 0)
+        {
+          slot_mtime[0] = st.st_mtime;
+        }
+    }
 
   f = fopen(RECORDER_STATE_PATH, "r");
   if (f)
@@ -242,6 +266,23 @@ static void recorder_scan_slots(void)
       fclose(f);
     }
 
+  for (i = 0; i < RECORDER_SLOT_COUNT; i++)
+    {
+      if (s_slot_exists[i])
+        {
+          if (newest_slot < 0 || slot_mtime[i] >= newest_time)
+            {
+              newest_slot = i;
+              newest_time = slot_mtime[i];
+            }
+          if (oldest_slot < 0 || slot_mtime[i] < oldest_time)
+            {
+              oldest_slot = i;
+              oldest_time = slot_mtime[i];
+            }
+        }
+    }
+
   if (next_slot >= 0)
     {
       int previous = (next_slot + RECORDER_SLOT_COUNT - 1) %
@@ -252,23 +293,25 @@ static void recorder_scan_slots(void)
           s_selected_slot = previous;
         }
     }
-
-  if (s_selected_slot < 0 && s_slot_count > 0)
+  else if (s_slot_count < RECORDER_SLOT_COUNT)
     {
       for (i = 0; i < RECORDER_SLOT_COUNT; i++)
         {
-          if (s_slot_exists[i])
+          if (!s_slot_exists[i])
             {
-              s_selected_slot = i;
-              s_next_slot = (i + 1) % RECORDER_SLOT_COUNT;
+              s_next_slot = i;
               break;
             }
         }
     }
-
-  if (s_slot_count == 0)
+  else
     {
-      s_next_slot = 0;
+      s_next_slot = oldest_slot >= 0 ? oldest_slot : 0;
+    }
+
+  if (s_selected_slot < 0)
+    {
+      s_selected_slot = newest_slot;
     }
 }
 
@@ -372,22 +415,36 @@ static void recorder_refresh(void)
       lv_obj_clear_state(s_play_btn, LV_STATE_DISABLED);
     }
 
-  if (s_elapsed && !s_recording)
+  if (s_slot_info)
     {
       char info[64];
       if (s_selected_slot >= 0 && s_slot_exists[s_selected_slot])
         {
           snprintf(info, sizeof(info),
-                   dm_t("录音 %d/10 · 已选 %02d", "%d/10 recordings · #%02d"),
+                   dm_t("%d/10 条 · 已选 %02d", "%d/10 recordings · #%02d"),
                    s_slot_count, s_selected_slot + 1);
         }
       else
         {
           snprintf(info, sizeof(info),
-                   dm_t("录音 %d/10 · 选择一条播放", "%d/10 recordings · select one"),
+                   dm_t("%d/10 条 · 选择录音播放", "%d/10 recordings · select"),
                    s_slot_count);
         }
-      lv_label_set_text(s_elapsed, info);
+      lv_label_set_text(s_slot_info, info);
+    }
+
+  if (s_progress_fill)
+    {
+      uint64_t now_ms = recorder_monotonic_ms();
+      int elapsed_sec = s_recording && s_record_started_ms &&
+                        now_ms >= s_record_started_ms
+                          ? (int)((now_ms - s_record_started_ms) / 1000)
+                          : 0;
+      int width;
+      if (elapsed_sec > RECORDER_MAX_SEC) elapsed_sec = RECORDER_MAX_SEC;
+      width = 280 * elapsed_sec / RECORDER_MAX_SEC;
+      if (width < 2 && s_recording) width = 2;
+      lv_obj_set_width(s_progress_fill, width);
     }
 
   lv_obj_set_style_bg_color(s_record_btn,
@@ -542,7 +599,7 @@ static void record_button_cb(lv_event_t *e)
           else
             {
               lv_label_set_text(s_status,
-                                dm_t("正在启动录音…最多30秒", "Starting… up to 30 seconds"));
+                                dm_t("正在启动录音…最多10分钟", "Starting… up to 10 minutes"));
             }
         }
       (void)recorder_start_job(REC_JOB_START, s_record_slot);
@@ -602,28 +659,69 @@ void dm_create_recorder(void)
   back = dm_btn(s_page, "←", "<", 36, 26, MD_SURFACE_HIGH, MD_ON_SURFACE,
                 back_button_cb, NULL);
   lv_obj_set_pos(back, 8, 6);
-  title = dm_lbl(s_page, "录音管理", "Recordings", g_dm_font_m, MD_ON_SURFACE);
+  title = dm_lbl(s_page, "录音机", "Recorder", g_dm_font_m, MD_ON_SURFACE);
   lv_obj_set_pos(title, 54, 8);
 
-  s_status = dm_lbl(s_page,
-                    "最多10条 · 每条30秒 · 满后覆盖最旧",
-                    "10 max · 30 sec each · oldest replaced",
-                    g_dm_font_s, MD_ON_SURFACE_VARIANT);
-  lv_obj_set_width(s_status, 296);
-  lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-  lv_obj_set_pos(s_status, 12, 34);
+  s_status = dm_lbl(s_page, "准备就绪", "Ready", g_dm_font_s,
+                    MD_ON_SURFACE_VARIANT);
+  lv_obj_set_width(s_status, 200);
+  lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+  lv_obj_align(s_status, LV_ALIGN_TOP_RIGHT, -12, 9);
 
-  s_elapsed = dm_lbl(s_page, "选择录音后可播放", "Select a recording to play",
-                     g_dm_font_s, MD_ON_SURFACE_VARIANT);
-  lv_obj_set_width(s_elapsed, 296);
+  s_elapsed = dm_lbl(s_page, "00:00 / 10:00", "00:00 / 10:00",
+                     g_dm_font_l, MD_ON_SURFACE);
+  lv_obj_set_width(s_elapsed, 300);
   lv_obj_set_style_text_align(s_elapsed, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-  lv_obj_set_pos(s_elapsed, 12, 52);
+  lv_obj_set_pos(s_elapsed, 10, 39);
+
+  s_progress_track = lv_obj_create(s_page);
+  lv_obj_set_size(s_progress_track, 280, 6);
+  lv_obj_align(s_progress_track, LV_ALIGN_TOP_MID, 0, 72);
+  lv_obj_set_style_bg_color(s_progress_track, lv_color_hex(0x3a414b),
+                            LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_progress_track, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_progress_track, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(s_progress_track, 3, LV_PART_MAIN);
+  lv_obj_clear_flag(s_progress_track, LV_OBJ_FLAG_SCROLLABLE);
+
+  s_progress_fill = lv_obj_create(s_progress_track);
+  lv_obj_set_size(s_progress_fill, 0, 6);
+  lv_obj_set_pos(s_progress_fill, 0, 0);
+  lv_obj_set_style_bg_color(s_progress_fill, lv_color_hex(C_HEART),
+                            LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_progress_fill, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_progress_fill, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(s_progress_fill, 3, LV_PART_MAIN);
+  lv_obj_clear_flag(s_progress_fill, LV_OBJ_FLAG_CLICKABLE |
+                                     LV_OBJ_FLAG_SCROLLABLE);
+
+  s_record_btn = dm_btn(s_page, "●  开始录音", "●  Record", 150, 54,
+                        MD_PRIMARY, MD_ON_PRIMARY,
+                        record_button_cb, NULL);
+  lv_obj_set_style_radius(s_record_btn, 27, LV_PART_MAIN);
+  lv_obj_set_pos(s_record_btn, 12, 86);
+
+  s_play_btn = dm_btn(s_page, "▶ 播放", "▶ Play", 130, 54,
+                      MD_SECONDARY_CONTAINER, MD_ON_SECONDARY_CONT,
+                      play_button_cb, NULL);
+  lv_obj_set_style_radius(s_play_btn, 18, LV_PART_MAIN);
+  lv_obj_set_pos(s_play_btn, 178, 86);
+
+  s_slot_info = dm_lbl(s_page, "0/10 条 · 选择录音播放",
+                       "0/10 recordings · select", g_dm_font_s,
+                       MD_ON_SURFACE_VARIANT);
+  lv_obj_set_width(s_slot_info, 300);
+  lv_obj_set_style_text_align(s_slot_info, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+  lv_obj_set_pos(s_slot_info, 12, 147);
 
   s_list = lv_obj_create(s_page);
-  lv_obj_set_size(s_list, 304, 84);
-  lv_obj_set_pos(s_list, 8, 70);
-  lv_obj_set_style_bg_opa(s_list, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(s_list, 0, LV_PART_MAIN);
+  lv_obj_set_size(s_list, 304, 62);
+  lv_obj_set_pos(s_list, 8, 166);
+  lv_obj_set_style_bg_color(s_list, lv_color_hex(MD_SURFACE), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_list, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_color(s_list, lv_color_hex(0x30343d), LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_list, 1, LV_PART_MAIN);
+  lv_obj_set_style_radius(s_list, 12, LV_PART_MAIN);
   lv_obj_set_style_pad_all(s_list, 2, LV_PART_MAIN);
   lv_obj_set_style_pad_row(s_list, 2, LV_PART_MAIN);
   lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
@@ -633,11 +731,11 @@ void dm_create_recorder(void)
   for (i = 0; i < RECORDER_SLOT_COUNT; i++)
     {
       lv_obj_t *row = lv_obj_create(s_list);
-      lv_obj_set_size(row, 292, 24);
+      lv_obj_set_size(row, 286, 22);
       lv_obj_set_style_bg_color(row, lv_color_hex(MD_SURFACE_CONTAINER),
                                 LV_PART_MAIN);
       lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
-      lv_obj_set_style_radius(row, 6, LV_PART_MAIN);
+      lv_obj_set_style_radius(row, 8, LV_PART_MAIN);
       lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
       lv_obj_set_style_pad_left(row, 8, LV_PART_MAIN);
       lv_obj_set_style_pad_right(row, 4, LV_PART_MAIN);
@@ -650,16 +748,6 @@ void dm_create_recorder(void)
       (void)dm_lbl(row, "", "", g_dm_font_s, MD_ON_SURFACE);
       s_rows[i] = row;
     }
-
-  s_record_btn = dm_btn(s_page, "开始录音", "Start recording", 286, 32,
-                        MD_PRIMARY, MD_ON_PRIMARY,
-                        record_button_cb, NULL);
-  lv_obj_set_pos(s_record_btn, 17, 158);
-
-  s_play_btn = dm_btn(s_page, "播放所选录音", "Play selected", 286, 32,
-                      MD_SECONDARY_CONTAINER, MD_ON_SECONDARY_CONT,
-                      play_button_cb, NULL);
-  lv_obj_set_pos(s_play_btn, 17, 198);
 
   s_busy = 0;
   s_job_done = 0;
@@ -704,17 +792,14 @@ void dm_recorder_tick(void)
               s_record_started_ms = recorder_monotonic_ms();
               if (s_elapsed)
                 {
-                  char elapsed[48];
-                  snprintf(elapsed, sizeof(elapsed),
-                           dm_t("已录 0 / %u 秒", "0 / %u sec"),
-                           RECORDER_MAX_SEC);
-                  lv_label_set_text(s_elapsed, elapsed);
+                  lv_label_set_text(s_elapsed, "00:00 / 10:00");
                 }
               if (s_status)
                 {
                   char status[48];
                   snprintf(status, sizeof(status),
-                           dm_t("正在录制第 %02d 条…", "Recording #%02d…"),
+                           dm_t("正在录制第 %02d 条 · 最长10分钟…",
+                                "Recording #%02d · up to 10 min…"),
                            s_record_slot + 1);
                   lv_label_set_text(s_status, status);
                 }
@@ -790,12 +875,17 @@ void dm_recorder_tick(void)
             {
               seconds = RECORDER_MAX_SEC;
             }
-          snprintf(elapsed, sizeof(elapsed),
-                   dm_t("已录 %u / %u 秒", "%u / %u sec"),
-                   seconds, RECORDER_MAX_SEC);
+          snprintf(elapsed, sizeof(elapsed), "%02u:%02u / 10:00",
+                   seconds / 60, seconds % 60);
           if (s_elapsed)
             {
               lv_label_set_text(s_elapsed, elapsed);
+            }
+          if (s_progress_fill)
+            {
+              int width = 280 * (int)seconds / RECORDER_MAX_SEC;
+              if (width < 2) width = 2;
+              lv_obj_set_width(s_progress_fill, width);
             }
         }
 

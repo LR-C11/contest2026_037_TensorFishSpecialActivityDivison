@@ -11,10 +11,12 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #ifdef CONFIG_DESKMATE_APP
 
 #define MED_PATH "/data/deskmate_med.txt"
+#define MED_TMP_PATH "/data/deskmate_med.txt.tmp"
 #define MED_MAX 8
 #define MED_NAME_MAX 32
 #define MED_KB_PIN_MAX 10
@@ -39,6 +41,7 @@ typedef struct
 static med_item_t s_med[MED_MAX];
 static int s_med_n;
 static int s_med_sel;
+static int s_med_loaded;
 
 static char s_add_name[MED_NAME_MAX];
 static int s_add_name_len;
@@ -120,21 +123,39 @@ static int med_today(void)
   return (tmv.tm_yday + tmv.tm_year * 1000) & 0xffff;
 }
 
-static void med_save(void)
+static int med_save(void)
 {
-  FILE *f = fopen(MED_PATH, "w");
+  FILE *f = fopen(MED_TMP_PATH, "w");
   int i;
+  int rc = 0;
+
   if (!f)
     {
-      return;
+      return -1;
     }
   for (i = 0; i < s_med_n; i++)
     {
-      fprintf(f, "%s|%d|%d,%d,%d|%d|%d\n", s_med[i].name, s_med[i].times,
-              s_med[i].hours[0], s_med[i].hours[1], s_med[i].hours[2],
-              s_med[i].taken, s_med[i].day);
+      if (fprintf(f, "%s|%d|%d,%d,%d|%d|%d\n", s_med[i].name,
+                  s_med[i].times, s_med[i].hours[0], s_med[i].hours[1],
+                  s_med[i].hours[2], s_med[i].taken, s_med[i].day) < 0)
+        {
+          rc = -1;
+          break;
+        }
     }
-  fclose(f);
+  if (fclose(f) != 0)
+    {
+      rc = -1;
+    }
+  if (rc == 0 && rename(MED_TMP_PATH, MED_PATH) != 0)
+    {
+      rc = -1;
+    }
+  if (rc != 0)
+    {
+      unlink(MED_TMP_PATH);
+    }
+  return rc;
 }
 
 static void med_load(void)
@@ -145,6 +166,7 @@ static void med_load(void)
 
   s_med_n = 0;
   s_med_sel = 0;
+  s_med_loaded = 1;
   if (!f)
     {
       return;
@@ -971,6 +993,227 @@ int dm_med_today_stats(int *sched_out, int *taken_out)
       *taken_out = taken;
     }
   return sched;
+}
+
+static int med_voice_has_any(const char *text, const char *const *words,
+                             size_t count)
+{
+  size_t i;
+  for (i = 0; i < count; i++)
+    {
+      if (strstr(text, words[i]))
+        {
+          return 1;
+        }
+    }
+  return 0;
+}
+
+static int med_voice_action_near_term(const char *text,
+                                      const char *const *actions,
+                                      size_t action_count,
+                                      const char *medicine_word)
+{
+  size_t medicine_len = strlen(medicine_word);
+  const char *medicine;
+
+  for (medicine = strstr(text, medicine_word); medicine;
+       medicine = strstr(medicine + 1, medicine_word))
+    {
+      size_t i;
+      for (i = 0; i < action_count; i++)
+        {
+          const char *action = strstr(text, actions[i]);
+          size_t action_len = strlen(actions[i]);
+          if (action &&
+              ((medicine < action + action_len &&
+                medicine + medicine_len > action) ||
+               (medicine >= action + action_len &&
+                (size_t)(medicine - (action + action_len)) <= 6) ||
+               (action >= medicine + medicine_len &&
+                (size_t)(action - (medicine + medicine_len)) <= 6)))
+            {
+              return 1;
+            }
+        }
+    }
+  return 0;
+}
+
+static int med_voice_action_near_medicine(
+    const char *text, const char *const *actions, size_t action_count,
+    const char *const *medicine_words, size_t medicine_count)
+{
+  size_t i;
+  for (i = 0; i < medicine_count; i++)
+    {
+      if (med_voice_action_near_term(text, actions, action_count,
+                                     medicine_words[i]))
+        {
+          return 1;
+        }
+    }
+  return 0;
+}
+
+int dm_med_voice_take(const char *utterance, char *reply, int reply_cap)
+{
+  static const char *const completed_words[] = {
+    "吃了", "吃过", "吃完药", "吃药了", "服了", "服过", "服用过",
+    "已服", "已吃", "已经吃", "已经服", "刚吃", "刚刚吃",
+    "刚服", "刚刚服", "服药了", "服完药"
+  };
+  static const char *const context_words[] = {
+    "药", "用药", "服用", "维生素", "胶囊", "药丸", "药水",
+    "药品", "药物", "阿莫西林", "阿司匹林", "胰岛素"
+  };
+  static const char *const generic_words[] = {
+    "吃药", "服药", "用药", "药片", "药物", "药品", "吃了药",
+    "吃过药", "吃完药", "服了药", "服过药", "服用药物", "已服药"
+  };
+  static const char *const negated_words[] = {
+    "没吃", "没有吃", "未吃", "没服", "没有服", "未服", "还没吃",
+    "还没有吃", "还没服", "还没有服", "不吃", "不服", "漏服",
+    "忘记吃", "忘了吃", "忘记服", "忘了服", "准备吃", "准备服",
+    "要吃药", "要服药", "该吃药", "该服药", "记得吃药", "记得服药"
+  };
+  static const char *const question_words[] = {
+    "吗", "有没有", "是否", "是不是", "要不要", "该不该", "？", "?"
+  };
+  med_item_t old_item;
+  int selected = -1;
+  int ambiguous = 0;
+  int today;
+  int i;
+  int slot;
+  int generic;
+
+  if (!utterance || !utterance[0] || !reply || reply_cap < 8)
+    {
+      return -1;
+    }
+  reply[0] = '\0';
+
+  if (med_voice_has_any(utterance, negated_words,
+                        sizeof(negated_words) / sizeof(negated_words[0])) ||
+      med_voice_has_any(utterance, question_words,
+                        sizeof(question_words) / sizeof(question_words[0])) ||
+      !med_voice_has_any(utterance, completed_words,
+                         sizeof(completed_words) / sizeof(completed_words[0])))
+    {
+      snprintf(reply, (size_t)reply_cap,
+               "我只会记录已经明确说出吃过的药；请说“我刚吃了药名”。");
+      return -1;
+    }
+
+  if (!s_med_loaded)
+    {
+      med_load();
+    }
+  if (s_med_n <= 0)
+    {
+      snprintf(reply, (size_t)reply_cap,
+               "吃药清单还是空的，请先在吃药页面添加药品，再让我记录。");
+      return -2;
+    }
+
+  for (i = 0; i < s_med_n; i++)
+    {
+      const char *found = strstr(utterance, s_med[i].name);
+      if (found && med_voice_action_near_term(
+                       utterance, completed_words,
+                       sizeof(completed_words) / sizeof(completed_words[0]),
+                       s_med[i].name))
+        {
+          if (selected < 0)
+            {
+              selected = i;
+            }
+          else if (selected != i)
+            {
+              const char *old_name = s_med[selected].name;
+              const char *new_name = s_med[i].name;
+              size_t old_len = strlen(old_name);
+              size_t new_len = strlen(new_name);
+              if (new_len > old_len && strstr(new_name, old_name))
+                {
+                  selected = i;
+                }
+              else if (!(old_len > new_len && strstr(old_name, new_name)))
+                {
+                  ambiguous = 1;
+                }
+            }
+        }
+    }
+
+  generic = med_voice_has_any(utterance, generic_words,
+                              sizeof(generic_words) / sizeof(generic_words[0])) &&
+            med_voice_action_near_medicine(
+                utterance, completed_words,
+                sizeof(completed_words) / sizeof(completed_words[0]),
+                context_words, sizeof(context_words) / sizeof(context_words[0]));
+  if (ambiguous)
+    {
+      snprintf(reply, (size_t)reply_cap,
+               "我听到多个药名了，请只说一种药的完整名称；没有修改记录。");
+      return -3;
+    }
+  if (selected < 0 && s_med_n == 1 && generic)
+    {
+      selected = 0;
+    }
+  if (selected < 0)
+    {
+      snprintf(reply, (size_t)reply_cap,
+               "没有在吃药清单中找到这个药名，请说清已登记的药名；没有修改记录。");
+      return -3;
+    }
+
+  today = med_today();
+  old_item = s_med[selected];
+  if ((int)s_med[selected].day != today)
+    {
+      s_med[selected].taken = 0;
+      s_med[selected].day = (uint16_t)today;
+    }
+  for (slot = 0; slot < s_med[selected].times && slot < 3; slot++)
+    {
+      if ((s_med[selected].taken & (1u << slot)) == 0)
+        {
+          break;
+        }
+    }
+  if (slot >= s_med[selected].times || slot >= 3)
+    {
+      s_med[selected] = old_item;
+      snprintf(reply, (size_t)reply_cap,
+               "今天“%s”的服药次数已经全部记录；我没有重复打卡。",
+               s_med[selected].name);
+      return -4;
+    }
+
+  s_med[selected].taken |= (uint8_t)(1u << slot);
+  s_med[selected].day = (uint16_t)today;
+  s_med_sel = selected;
+  if (med_save() != 0)
+    {
+      s_med[selected] = old_item;
+      snprintf(reply, (size_t)reply_cap,
+               "“%s”的服药记录没有保存成功，请稍后重试。",
+               s_med[selected].name);
+      med_paint();
+      return -5;
+    }
+
+  if (s_med_tip)
+    {
+      lv_label_set_text(s_med_tip, "语音已记录服药");
+    }
+  med_paint();
+  snprintf(reply, (size_t)reply_cap, "已记录“%s”今天服药 %d/%d。",
+           s_med[selected].name, slot + 1, s_med[selected].times);
+  return 0;
 }
 
 void dm_create_med(void)

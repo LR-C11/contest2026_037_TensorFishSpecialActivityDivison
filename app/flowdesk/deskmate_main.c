@@ -82,6 +82,7 @@ int flowdesk_main(int argc, FAR char *argv[])
   dm_create_tools();
   dm_create_life();
   dm_create_reminders();
+  dm_create_meeting();
   dm_create_fun();
   dm_create_recorder();
   dm_create_2048();
