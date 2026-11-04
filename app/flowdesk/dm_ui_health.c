@@ -82,6 +82,7 @@ static uint8_t s_pick_quick;
 static uint8_t s_pick_type;
 
 static void paint_log_picks(void);
+static int voice_mood_term_negated(const char *text, const char *found);
 
 /* ---------- storage ---------- */
 
@@ -812,15 +813,41 @@ int dm_health_score_detail(char *buf, int cap)
   return v;
 }
 
+static int health_voice_is_down(const char *text)
+{
+  static const char *const terms[] = {
+    "不开心", "不太开心", "不高兴", "不太高兴", "心情不好",
+    "心情不太好", "心情差", "状态不好", "状态不太好", "情绪不好",
+    "情绪不太好", "情绪低落", "不太好", "不好受", "低落", "提不起劲",
+    "心累", "心烦",
+    "难受", "难过", "伤心", "焦虑", "压力大", "压力很大", "有压力",
+    "很累", "累", "疲惫",
+    "孤独", "孤单", "烦躁", "沮丧"
+  };
+  size_t i;
+
+  if (!text)
+    {
+      return 0;
+    }
+  for (i = 0; i < sizeof(terms) / sizeof(terms[0]); i++)
+    {
+      const char *found = strstr(text, terms[i]);
+      if (found && !voice_mood_term_negated(text, found))
+        {
+          return 1;
+        }
+    }
+  return 0;
+}
+
 void dm_health_voice_advice(const char *user_text, char *out, int cap)
 {
-  const char *recent = NULL;
   int score;
   int water;
   int sched = 0;
   int taken = 0;
   int focus;
-  int i;
   int is_down;
   int has_data;
 
@@ -834,50 +861,12 @@ void dm_health_voice_advice(const char *user_text, char *out, int cap)
   water = dm_water_today_cups();
   focus = g_dm.focus_done_min;
   (void)dm_med_today_stats(&sched, &taken);
-  is_down = user_text &&
-            (strstr(user_text, "不开心") || strstr(user_text, "心情不好") ||
-             strstr(user_text, "难过") || strstr(user_text, "伤心") ||
-             strstr(user_text, "焦虑") || strstr(user_text, "压力大") ||
-             strstr(user_text, "很累") || strstr(user_text, "疲惫") ||
-             strstr(user_text, "孤独") || strstr(user_text, "烦躁") ||
-             strstr(user_text, "沮丧"));
-
-  if (s_rec_n > 0)
-    {
-      const dm_mood_rec_t *rec = &s_recs[0];
-      for (i = 0; i < (int)(sizeof(s_moods) / sizeof(s_moods[0])); i++)
-        {
-          if (rec->mood_mask & s_moods[i].bit)
-            {
-              recent = s_moods[i].zh;
-              break;
-            }
-        }
-      if (!recent && rec->quick > 0 && rec->quick <= DM_QUICK_MAX)
-        {
-          recent = s_quick_zh[rec->quick - 1];
-        }
-    }
+  is_down = health_voice_is_down(user_text);
 
   if (is_down)
     {
-      if (has_data && recent)
-        {
-          snprintf(out, (size_t)cap,
-                   "参考健康页：综合分%d，最近心情“%s”，专注%d分钟、喝水%d杯。先慢慢呼吸、喝水或休息；若持续影响生活，找信任的人或专业人士聊聊。",
-                   score, recent, focus, water);
-        }
-      else if (has_data)
-        {
-          snprintf(out, (size_t)cap,
-                   "参考健康页：综合分%d，专注%d分钟、喝水%d杯。先慢呼吸、休息；若持续影响生活，找信任的人或专业人士聊聊。",
-                   score, focus, water);
-        }
-      else
-        {
-          snprintf(out, (size_t)cap,
-                   "听起来你现在不太好受。我还没看到今日健康记录。先慢呼吸、喝水或休息；若持续影响生活，找信任的人或专业人士聊聊。");
-        }
+      snprintf(out, (size_t)cap,
+               "听起来你现在不太好受，谢谢你告诉我。我在这里陪你。愿意说说发生了什么吗？可以先深呼吸、喝点水或休息一下。若持续影响生活，找信任的人聊聊。");
     }
   else if (has_data)
     {
@@ -890,7 +879,8 @@ void dm_health_voice_advice(const char *user_text, char *out, int cap)
       snprintf(out, (size_t)cap,
                "我还没看到今天的健康记录。可以先做几次慢呼吸、喝点水，或者记录一下此刻的心情。");
     }
-  if (sched > 0 && taken < sched && strlen(out) + 64 < (size_t)cap)
+  if (!is_down && sched > 0 && taken < sched &&
+      strlen(out) + 64 < (size_t)cap)
     {
       size_t used = strlen(out);
       snprintf(out + used, (size_t)cap - used,
@@ -1056,7 +1046,9 @@ static void now_hm(uint8_t *h, uint8_t *m)
 static int voice_mood_term_negated(const char *text, const char *found)
 {
   static const char *const negations[] = {
-    "并不是", "没有", "并不", "不太", "不再", "没那么", "不", "没", "未"
+    "没有觉得", "并没有", "不认为", "不觉得", "没什么", "没那么",
+    "并不是", "不是", "没有", "并不", "不再", "不太", "不怎么",
+    "不", "没", "未"
   };
   size_t i;
 
@@ -1078,13 +1070,18 @@ int dm_health_record_mood_voice(const char *text)
     const char *word;
     uint16_t bit;
   } terms[] = {
-    { "心情不好", DM_M_SAD }, { "心情差", DM_M_SAD },
-    { "情绪低落", DM_M_SAD }, { "不开心", DM_M_SAD },
-    { "不高兴", DM_M_SAD }, { "不太开心", DM_M_SAD },
-    { "不太高兴", DM_M_SAD }, { "不愉快", DM_M_SAD },
-    { "难过", DM_M_SAD }, { "伤心", DM_M_SAD },
-    { "悲伤", DM_M_SAD }, { "沮丧", DM_M_SAD },
-    { "难受", DM_M_SAD }, { "开心", DM_M_JOY },
+    { "心情不好", DM_M_SAD }, { "心情不太好", DM_M_SAD },
+    { "心情差", DM_M_SAD }, { "状态不好", DM_M_SAD },
+    { "状态不太好", DM_M_SAD }, { "情绪不好", DM_M_SAD },
+    { "情绪不太好", DM_M_SAD }, { "情绪低落", DM_M_SAD },
+    { "不开心", DM_M_SAD }, { "不太开心", DM_M_SAD },
+    { "不高兴", DM_M_SAD }, { "不太高兴", DM_M_SAD },
+    { "不愉快", DM_M_SAD }, { "提不起劲", DM_M_TIRED },
+    { "心累", DM_M_TIRED }, { "心烦", DM_M_STRESS },
+    { "低落", DM_M_SAD }, { "难过", DM_M_SAD },
+    { "伤心", DM_M_SAD }, { "悲伤", DM_M_SAD },
+    { "沮丧", DM_M_SAD }, { "难受", DM_M_SAD },
+    { "开心", DM_M_JOY },
     { "高兴", DM_M_JOY }, { "愉快", DM_M_JOY },
     { "喜爱", DM_M_LOVE }, { "幸福", DM_M_LOVE },
     { "兴奋", DM_M_EXCITE }, { "激动", DM_M_EXCITE },
@@ -1127,9 +1124,12 @@ int dm_health_record_mood_voice(const char *text)
       /* "不开心/不高兴" are sadness labels, but do not also score them as
        * positive happiness. Other negated states are not logged as facts. */
       if ((terms[i].bit == DM_M_JOY &&
-           (strstr(text, "不开心") || strstr(text, "不高兴") ||
+           (strstr(text, "不开心") || strstr(text, "不太开心") ||
+            strstr(text, "不高兴") || strstr(text, "不太高兴") ||
             strstr(text, "不愉快") || strstr(text, "心情不好") ||
-            strstr(text, "心情差"))) ||
+            strstr(text, "心情差") || strstr(text, "状态不好") ||
+            strstr(text, "状态不太好") || strstr(text, "情绪不好") ||
+            strstr(text, "情绪不太好"))) ||
           (terms[i].bit == DM_M_STRESS &&
            (strstr(text, "压力不大") || strstr(text, "压力不高") ||
             strstr(text, "没有压力") || strstr(text, "没压力"))) ||
