@@ -1385,14 +1385,19 @@ static int parse_intent(const char *text, assistant_intent_t *intent)
     "设置提醒", "设个提醒"
   };
   static const char *const mood_words[] = {
-    "不开心", "不高兴", "心情不好", "心情差", "情绪低落", "难受",
-    "难过", "伤心", "焦虑", "压力大", "很累", "疲惫", "孤独",
-    "烦躁", "沮丧"
+    "不开心", "不太开心", "不高兴", "不太高兴", "心情不好",
+    "心情不太好", "心情差", "状态不好", "状态不太好", "情绪不好",
+    "情绪不太好", "情绪低落", "低落", "提不起劲", "心累", "心烦",
+    "难受", "难过", "伤心", "焦虑", "压力大", "压力很大", "有压力", "很累",
+    "疲惫", "孤独", "烦躁", "沮丧"
   };
   static const char *const mood_state_words[] = {
-    "不开心", "不高兴", "心情不好", "心情差", "情绪低落", "难受",
-    "难过", "伤心", "焦虑", "压力大", "很累", "疲惫", "孤独",
-    "烦躁", "沮丧", "开心", "高兴", "愉快", "兴奋", "激动",
+    "不开心", "不太开心", "不高兴", "不太高兴", "心情不好",
+    "心情不太好", "心情差", "状态不好", "状态不太好", "情绪不好",
+    "情绪不太好", "情绪低落", "不太好", "不好受", "低落", "提不起劲",
+    "心累", "心烦",
+    "难受", "难过", "伤心", "焦虑", "压力大", "压力很大", "有压力", "很累",
+    "疲惫", "孤独", "烦躁", "沮丧", "开心", "高兴", "愉快", "兴奋", "激动",
     "自信", "期待", "满足", "满意", "感动", "平静", "平和",
     "放松", "安心", "若有所思", "思考", "惊讶", "生气", "愤怒",
     "恼火", "累", "困", "紧张", "担心", "不安", "孤单", "有压力",
@@ -1407,9 +1412,10 @@ static int parse_intent(const char *text, assistant_intent_t *intent)
     "帮我记心情", "帮我记录心情"
   };
   static const char *const mood_self_report[] = {
-    "我现在", "我今天", "今天我", "最近我", "我的心情", "我心情",
-    "我觉得", "我感觉", "今天感觉", "现在感觉", "我很", "我有点",
-    "我挺", "我好"
+    "我现在", "我今天", "今天我", "最近我", "我最近", "我的心情",
+    "我心情", "最近心情", "今天心情", "这几天心情", "我觉得",
+    "我感觉", "今天感觉", "现在感觉", "我不太好", "我不好受",
+    "我状态不好", "我状态不太好", "我很", "我有点", "我挺", "我好"
   };
   static const char *const no_reminder[] = {
     "不要提醒", "别提醒", "不用提醒", "取消提醒", "不要闹钟", "取消闹钟"
@@ -1562,7 +1568,9 @@ static int parse_intent(const char *text, assistant_intent_t *intent)
                      sizeof(mood_record_triggers[0])))
     {
       intent->type = INTENT_MOOD_RECORD;
-      intent->seconds = 1;
+      intent->seconds = contains_any(
+          text, mood_state_words,
+          sizeof(mood_state_words) / sizeof(mood_state_words[0])) ? 0 : 1;
       snprintf(intent->text, sizeof(intent->text), "%s", text);
       return 1;
     }
@@ -1913,7 +1921,16 @@ static int run_intent(const assistant_intent_t *intent, char *reply, size_t cap)
           }
         if (rc == -2)
           {
-            snprintf(reply, cap, "%s", "心情记录没有保存成功，请稍后重试。");
+            if (intent->seconds == 0)
+              {
+                char advice[160];
+                dm_health_voice_advice(intent->text, advice, sizeof(advice));
+                snprintf(reply, cap, "心情暂未保存。%s", advice);
+              }
+            else
+              {
+                snprintf(reply, cap, "%s", "心情记录没有保存成功，请稍后重试。");
+              }
             return -1;
           }
         if (intent->seconds)
