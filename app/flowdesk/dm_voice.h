@@ -36,6 +36,8 @@ typedef enum {
 int dm_voice_mic_available(void);
 dm_voice_state_t dm_voice_state(void);
 dm_voice_failure_t dm_voice_last_failure(void);
+/* Most recent voice result contains health context; UI must recheck access. */
+int dm_voice_health_reply(void);
 
 /* tap-to-talk: start then stop */
 int dm_voice_rec_start(int max_seconds);

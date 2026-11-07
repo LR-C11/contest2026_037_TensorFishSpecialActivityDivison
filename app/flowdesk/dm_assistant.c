@@ -5,6 +5,7 @@
 #include "dm_ai_permissions.h"
 #include "dm_ai_log.h"
 #include "dm_ai_local_read.h"
+#include "dm_ai_data.h"
 
 #ifdef CONFIG_DESKMATE_APP
 
@@ -43,7 +44,9 @@ typedef enum
   INTENT_ALARM_AFTER,
   INTENT_TIME_ERROR,
   INTENT_DELETE_UNSUPPORTED,
-  INTENT_READ_LOCAL
+  INTENT_READ_LOCAL,
+  INTENT_READ_HEALTH,
+  INTENT_DELETE_DATA
 } assistant_intent_type_t;
 
 typedef struct
@@ -61,6 +64,8 @@ typedef struct
   int operation_rc;
   dm_ai_permission_t denied_permission;
   dm_ai_read_kind_t read_kind;
+  dm_ai_health_query_t health_query;
+  dm_ai_delete_request_t deletion;
 } assistant_intent_t;
 
 static pthread_mutex_t s_intent_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -1410,6 +1415,214 @@ static int parse_local_read_request(const char *text, dm_ai_read_kind_t *kind)
   return 0;
 }
 
+static int parse_health_read_request(const char *text, dm_ai_health_query_t *query)
+{
+  static const char *const writes[] = {
+    "删除", "删掉", "移除", "清空", "清除", "添加", "新建", "保存", "记录一下", "记一下", "记下"
+  };
+  static const char *const asks[] = {
+    "多少", "几杯", "什么时候", "几点", "哪天", "多久", "最近一条", "最新一条",
+    "最后一条", "上次", "最近一次", "最新的", "查看", "查询", "读一下", "读出", "告诉我",
+    "是什么", "怎么样", "有哪些", "有什么"
+  };
+  int water, mood;
+  if (contains_any(text, writes, sizeof(writes) / sizeof(writes[0]))) return 0;
+  if (!contains_any(text, asks, sizeof(asks) / sizeof(asks[0]))) return 0;
+  if (strstr(text, "应该") || strstr(text, "建议") || strstr(text, "合适") ||
+      strstr(text, "每天应该")) return 0;
+  water = strstr(text, "喝水") || strstr(text, "饮水") || strstr(text, "杯水") ||
+          (strstr(text, "喝") && strstr(text, "水")) ||
+          (strstr(text, "喝了") && strstr(text, "杯"));
+  mood = strstr(text, "心情") || strstr(text, "情绪记录");
+  if (!water && !mood) return 0;
+  *query = water ? DM_AI_HEALTH_WATER : DM_AI_HEALTH_LAST_MOOD;
+  if (water && mood) *query = DM_AI_HEALTH_WATER_AND_MOOD;
+  if (strstr(text, "昨天") || strstr(text, "前天") ||
+      strstr(text, "上周") || strstr(text, "上个月") || strstr(text, "历史") ||
+      strstr(text, "哪天") || strstr(text, "这周") || strstr(text, "本周") ||
+      strstr(text, "明天") || strstr(text, "后天") || strstr(text, "星期") ||
+      strstr(text, "毫升") || strstr(text, "多少升") || strstr(text, "每次") ||
+      strstr(text, "月") || strstr(text, "号") ||
+      strstr(text, "一共") || strstr(text, "总共") ||
+      (water && !mood && (strstr(text, "什么时候") || strstr(text, "几点") || strstr(text, "多久"))))
+    *query = DM_AI_HEALTH_UNAVAILABLE;
+  return 1;
+}
+
+static void delete_trim(char *text)
+{
+  size_t n = strlen(text);
+  while (n && (text[0] == ' ' || text[0] == '\t'))
+    { memmove(text, text + 1, n); n--; }
+  while (n && (text[n - 1] == ' ' || text[n - 1] == '\t' || text[n - 1] == '.' ||
+               text[n - 1] == '!' || text[n - 1] == ',')) text[--n] = '\0';
+  while (n >= 3 && (memcmp(text + n - 3, "。", 3) == 0 ||
+                    memcmp(text + n - 3, "！", 3) == 0 ||
+                    memcmp(text + n - 3, "，", 3) == 0))
+    { n -= 3; text[n] = '\0'; }
+}
+
+static void delete_strip_context(char *text)
+{
+  static const char *const words[] = {"今天", "今日", "我的", "的"};
+  size_t i;
+  int changed;
+  do {
+    changed = 0;
+    delete_trim(text);
+    for (i = 0; i < sizeof(words) / sizeof(words[0]); i++)
+      {
+        size_t n = strlen(words[i]);
+        if (strncmp(text, words[i], n) == 0)
+          { memmove(text, text + n, strlen(text + n) + 1); changed = 1; break; }
+      }
+  } while (changed);
+}
+
+static int delete_index(const char *text)
+{
+  size_t len = strlen(text), start = strlen("第"), end;
+  int value;
+  if (strncmp(text, "第", start) != 0) return 0;
+  for (end = start; end + 3 <= len; end++)
+    if ((memcmp(text + end, "条", 3) == 0 || memcmp(text + end, "个", 3) == 0 ||
+         memcmp(text + end, "项", 3) == 0) &&
+        (end + 3 == len || strcmp(text + end + 3, "的") == 0) &&
+        parse_number_slice(text, start, end, &value))
+      return value > 0 && value <= 12 ? value : 0;
+  return 0;
+}
+
+static int delete_title(const char *text, char *out, size_t cap)
+{
+  size_t n = strlen(text), begin = 0, end = n;
+  if (!n) return 0;
+  if (text[0] == '"' || text[0] == '\'')
+    {
+      if (n < 3 || text[n - 1] != text[0] || strchr(text + 1, text[0]) != text + n - 1) return 0;
+      begin = 1; end--;
+    }
+  else if (strncmp(text, "“", 3) == 0 || strncmp(text, "‘", 3) == 0)
+    {
+      const char *close = strncmp(text, "“", 3) == 0 ? "”" : "’";
+      if (n < 7 || memcmp(text + n - 3, close, 3) || strstr(text + 3, close) != text + n - 3) return 0;
+      begin = 3; end -= 3;
+    }
+  else if (strstr(text, "和") || strstr(text, "以及") || strstr(text, "然后") ||
+           strstr(text, "全部") || strstr(text, "所有") || strstr(text, "第") ||
+           strstr(text, "最近") || strstr(text, "这条") || strstr(text, "那条")) return 0;
+  if (end <= begin || end - begin >= cap) return 0;
+  memcpy(out, text + begin, end - begin);
+  out[end - begin] = '\0';
+  return 1;
+}
+
+/* 0=no delete command, -1=needs a precise target, 1=one explicit target. */
+static int parse_delete_request(const char *text, dm_ai_delete_request_t *request)
+{
+  static const char *const verbs[] = {"删除", "删掉", "清空", "清除", "移除"};
+  static const struct {const char *name; dm_ai_data_kind_t kind;} objects[] = {
+    {"备忘录", DM_AI_DATA_NOTE}, {"备忘", DM_AI_DATA_NOTE},
+    {"待办事项", DM_AI_DATA_TODO}, {"待办", DM_AI_DATA_TODO},
+    {"闹钟", DM_AI_DATA_ALARM}, {"倒数日", DM_AI_DATA_COUNTDOWN},
+    {"心情记录", DM_AI_DATA_MOOD}, {"心情", DM_AI_DATA_MOOD},
+    {"喝水记录", DM_AI_DATA_WATER}, {"饮水记录", DM_AI_DATA_WATER},
+    {"喝水", DM_AI_DATA_WATER}, {"饮水", DM_AI_DATA_WATER},
+    {"服药记录", DM_AI_DATA_MEDICATION}, {"吃药记录", DM_AI_DATA_MEDICATION}
+  };
+  const char *command = NULL, *object = NULL, *p;
+  size_t verb_len = 0, object_len = 0, i, len;
+  char before[INTENT_TEXT_MAX], after[INTENT_TEXT_MAX];
+  int index, today;
+  memset(request, 0, sizeof(*request));
+  request->kind = DM_AI_DATA_COUNT;
+  for (i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++)
+    {
+      const char *found = strstr(text, verbs[i]);
+      if (found && (!command || found < command))
+        { command = found; verb_len = strlen(verbs[i]); }
+    }
+  if (!command) return 0;
+  /* A note containing the word delete remains a note, not an operation. */
+  p = strstr(text, "记");
+  if (p && p < command) return 0;
+  /* A quoted example, conditional or explanation is not a command. */
+  {
+    static const char *const prefixes[] = {
+      "麻烦你", "麻烦", "帮我", "替我", "给我", "请", "把", "我想", "我要", "我需要", "现在", "先"
+    };
+    size_t prefix_len = (size_t)(command - text);
+    int changed;
+    if (prefix_len >= sizeof(before)) return -1;
+    memcpy(before, text, prefix_len); before[prefix_len] = '\0';
+    do {
+      changed = 0; delete_trim(before);
+      for (i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+        {
+          size_t n = strlen(prefixes[i]);
+          if (strncmp(before, prefixes[i], n) == 0)
+            { memmove(before, before + n, strlen(before + n) + 1); changed = 1; break; }
+        }
+    } while (changed);
+    if (before[0]) return -1;
+  }
+  if (strstr(text, "吗") || strstr(text, "？") || strchr(text, '?') ||
+      strstr(text, "是否") || strstr(text, "怎么") || strstr(text, "如何") ||
+      strstr(text, "能不能") || strstr(text, "可不可以")) return -1;
+  p = command + verb_len;
+  for (i = 0; i < sizeof(objects) / sizeof(objects[0]); i++)
+    {
+      const char *found = strstr(p, objects[i].name);
+      if (found && (!object || found < object))
+        { object = found; object_len = strlen(objects[i].name); request->kind = objects[i].kind; }
+    }
+  if (!object) return -1;
+  len = (size_t)(object - p);
+  if (len >= sizeof(before) || strlen(object + object_len) >= sizeof(after)) return -1;
+  memcpy(before, p, len); before[len] = '\0';
+  snprintf(after, sizeof(after), "%s", object + object_len);
+  today = strstr(before, "今天") || strstr(before, "今日");
+  delete_strip_context(before);
+  delete_trim(after);
+  if (strcmp(after, "记录") == 0) after[0] = '\0';
+  if (request->kind < DM_AI_DATA_MOOD && today) return -1;
+  if (request->kind == DM_AI_DATA_WATER)
+    {
+      if (!today || after[0]) return -1;
+      if (!before[0]) request->selector = DM_AI_SELECT_TODAY;
+      else
+        {
+          const char *cup = strstr(before, "杯");
+          if (!cup || cup[3] || !parse_number_slice(before, 0, (size_t)(cup - before), &index) ||
+              index < 1 || index > 1000) return -1;
+          request->selector = DM_AI_SELECT_CUPS; request->number = index;
+        }
+      return 1;
+    }
+  if (strncmp(command, "清空", 6) == 0 || strstr(before, "全部") || strstr(before, "所有")) return -1;
+  index = delete_index(before[0] ? before : after);
+  if (index && !(before[0] && after[0]))
+    { request->selector = DM_AI_SELECT_INDEX; request->number = index; return 1; }
+  if (request->kind == DM_AI_DATA_MOOD)
+    {
+      const char *part = before[0] ? before : after;
+      if (before[0] && after[0]) return -1;
+      if (strcmp(part, "最近一条") && strcmp(part, "最新一条") &&
+          strcmp(part, "最近一次") && strcmp(part, "最后一条")) return -1;
+      request->selector = DM_AI_SELECT_LATEST;
+      return 1;
+    }
+  if (request->kind == DM_AI_DATA_MEDICATION && before[0] && !after[0])
+    {
+      len = strlen(before);
+      if (len >= 3 && strcmp(before + len - 3, "的") == 0) before[len - 3] = '\0';
+      snprintf(after, sizeof(after), "%s", before); before[0] = '\0';
+    }
+  if (before[0] || !delete_title(after, request->title, sizeof(request->title))) return -1;
+  request->selector = DM_AI_SELECT_TITLE;
+  return 1;
+}
+
 static int parse_intent(const char *text, assistant_intent_t *intent)
 {
   static const char *const note_triggers[] = {
@@ -1488,7 +1701,12 @@ static int parse_intent(const char *text, assistant_intent_t *intent)
       strstr(text, "别计时") || strstr(text, "不玩了") ||
       strstr(text, "还没吃") || strstr(text, "没有吃") || strstr(text, "没吃") ||
       strstr(text, "没服") || strstr(text, "没有服") ||
-      strstr(text, "准备吃") || strstr(text, "准备服"))
+      strstr(text, "准备吃") || strstr(text, "准备服") || strstr(text, "别删") ||
+      strstr(text, "不删除") || strstr(text, "不删掉") || strstr(text, "别移除") ||
+      strstr(text, "别清空") || strstr(text, "不清空") || strstr(text, "别清除") ||
+      strstr(text, "不清除") || strstr(text, "不移除") || strstr(text, "不想删") ||
+      strstr(text, "不需要删") || strstr(text, "无需删") || strstr(text, "不能删") ||
+      strstr(text, "禁止删") || strstr(text, "不允许删") || strstr(text, "不是要删"))
     {
       intent->type = INTENT_CANCEL;
       return 1;
@@ -1496,6 +1714,13 @@ static int parse_intent(const char *text, assistant_intent_t *intent)
   /* Read-only questions are handled locally; they never create records. */
   if (parse_local_read_request(text, &intent->read_kind))
     { intent->type = INTENT_READ_LOCAL; return 1; }
+  if (parse_health_read_request(text, &intent->health_query))
+    { intent->type = INTENT_READ_HEALTH; return 1; }
+  {
+    int deletion = parse_delete_request(text, &intent->deletion);
+    if (deletion)
+      { intent->type = deletion > 0 ? INTENT_DELETE_DATA : INTENT_DELETE_UNSUPPORTED; return 1; }
+  }
   /* Other questions never confirm a state-changing action. */
   if (strstr(text, "吗") || strstr(text, "是否") || strstr(text, "有没有") ||
       strstr(text, "是不是") || strstr(text, "要不要") ||
@@ -1785,6 +2010,13 @@ static dm_ai_log_action_t intent_log_action(const assistant_intent_t *intent)
       case INTENT_WAKE: return DM_AI_LOG_GREETING;
       case INTENT_CANCEL: return DM_AI_LOG_CANCEL;
       case INTENT_DELETE_UNSUPPORTED: return DM_AI_LOG_DELETE;
+      case INTENT_DELETE_DATA:
+        return intent->deletion.kind >= 0 && intent->deletion.kind < DM_AI_DATA_COUNT
+                 ? (dm_ai_log_action_t)(DM_AI_LOG_DELETE_NOTE + intent->deletion.kind)
+                 : DM_AI_LOG_DELETE;
+      case INTENT_READ_HEALTH:
+        return intent->health_query == DM_AI_HEALTH_WATER ? DM_AI_LOG_READ_WATER :
+               intent->health_query == DM_AI_HEALTH_LAST_MOOD ? DM_AI_LOG_READ_LAST_MOOD : DM_AI_LOG_READ_HEALTH;
       case INTENT_TIME_ERROR: return DM_AI_LOG_TIME_ERROR;
       case INTENT_READ_LOCAL:
         return intent->read_kind == DM_AI_READ_NOTES ? DM_AI_LOG_READ_NOTES :
@@ -1819,6 +2051,16 @@ static void record_intent_result(const assistant_intent_t *intent, int rc,
     { result = DM_AI_LOG_SKIPPED; reason = DM_AI_LOG_REASON_CANCELLED; }
   else if (action == DM_AI_LOG_DELETE)
     { result = DM_AI_LOG_SKIPPED; reason = DM_AI_LOG_REASON_UNSUPPORTED; }
+  else if (intent->type == INTENT_DELETE_DATA || intent->type == INTENT_READ_HEALTH)
+    {
+      if (raw_rc == DM_AI_DATA_SAVE) reason = DM_AI_LOG_REASON_SAVE;
+      else if (raw_rc == DM_AI_DATA_CLOCK) reason = DM_AI_LOG_REASON_CLOCK;
+      else if (raw_rc == DM_AI_DATA_NOT_FOUND) reason = DM_AI_LOG_REASON_NOT_FOUND;
+      else if (raw_rc == DM_AI_DATA_AMBIGUOUS) reason = DM_AI_LOG_REASON_AMBIGUOUS;
+      else if (raw_rc == DM_AI_DATA_BUSY) reason = DM_AI_LOG_REASON_BUSY;
+      else if (raw_rc == DM_AI_DATA_UNSUPPORTED) reason = DM_AI_LOG_REASON_UNSUPPORTED;
+      else if (raw_rc) reason = DM_AI_LOG_REASON_INVALID;
+    }
   else if (action == DM_AI_LOG_TIME_ERROR)
     reason = DM_AI_LOG_REASON_INVALID;
   else if (rc != 0)
@@ -1854,6 +2096,8 @@ static dm_ai_permission_t intent_permission(const assistant_intent_t *intent)
   switch (intent->type)
     {
       case INTENT_READ_LOCAL: return DM_AI_READ_LOCAL_DATA;
+      case INTENT_READ_HEALTH: return DM_AI_READ_HEALTH;
+      case INTENT_DELETE_DATA: return dm_ai_data_delete_permission(intent->deletion.kind);
       case INTENT_FOCUS: return DM_AI_FOCUS;
       case INTENT_TODO_AFTER:
       case INTENT_TODO_AT: return DM_AI_TODO;
@@ -1893,7 +2137,11 @@ static int intent_check_permission(assistant_intent_t *intent,
       return 0;
     }
   else if (!dm_ai_permission_allowed(required)) denied = required;
+  else if (intent->type == INTENT_DELETE_DATA &&
+           !dm_ai_permission_allowed(dm_ai_data_read_permission(intent->deletion.kind)))
+    denied = dm_ai_data_read_permission(intent->deletion.kind);
   else if (intent->type != INTENT_MOOD && intent->type != INTENT_READ_LOCAL &&
+           intent->type != INTENT_READ_HEALTH && intent->type != INTENT_DELETE_DATA &&
            !dm_ai_permission_allowed(DM_AI_OPEN_APPS)) denied = DM_AI_OPEN_APPS;
   else return 1;
 
@@ -1924,6 +2172,53 @@ static int run_intent(assistant_intent_t *intent, char *reply, size_t cap)
 
   switch (intent->type)
     {
+      case INTENT_READ_HEALTH:
+        rc = dm_ai_read_health(intent->health_query, reply, cap);
+        intent->operation_rc = rc;
+        if (rc == DM_AI_DATA_DENIED)
+          {
+            intent->denied_permission = dm_ai_permission_allowed(DM_AI_LOCAL)
+                                         ? DM_AI_READ_HEALTH : DM_AI_LOCAL;
+            snprintf(reply, cap, "%s", "读取健康记录权限已关闭，未返回已有健康数据。");
+          }
+        else if (rc == DM_AI_DATA_CLOCK)
+          snprintf(reply, cap, "%s", "设备时间尚未校准，无法确定今日喝水或最近心情的日期，请先校准时间。");
+        else if (rc)
+          snprintf(reply, cap, "%s", "本地健康记录读取失败，无法确认具体数值或时间，请在健康页核对。");
+        return rc;
+      case INTENT_DELETE_DATA:
+        rc = dm_ai_delete_data(&intent->deletion);
+        intent->operation_rc = rc;
+        if (!rc)
+          {
+            static const char *const replies[DM_AI_DATA_COUNT] = {
+              "已删除指定的一条备忘。", "已删除指定的一条待办。",
+              "已删除指定的一条闹钟。", "已删除指定的一条倒数日。",
+              "已删除指定的一条今日心情记录。", "已删除指定范围的今日喝水记录。",
+              "已清除指定药品今天的服药打卡，药品和用药计划已保留。"
+            };
+            snprintf(reply, cap, "%s", replies[intent->deletion.kind]);
+          }
+        else if (rc == DM_AI_DATA_DENIED)
+          {
+            intent->denied_permission = !dm_ai_permission_allowed(DM_AI_LOCAL) ? DM_AI_LOCAL :
+              !dm_ai_permission_allowed(dm_ai_data_read_permission(intent->deletion.kind))
+                ? dm_ai_data_read_permission(intent->deletion.kind) : dm_ai_data_delete_permission(intent->deletion.kind);
+            snprintf(reply, cap, "已关闭“%s”权限，未查找或删除记录。", dm_ai_permission_name(intent->denied_permission));
+          }
+        else if (rc == DM_AI_DATA_SAVE)
+          snprintf(reply, cap, "%s", "删除未保存，原记录已恢复，请稍后重试。");
+        else if (rc == DM_AI_DATA_NOT_FOUND)
+          snprintf(reply, cap, "%s", "没有找到指定的可删除记录，未修改其他数据。请核对完整名称或当前列表编号。");
+        else if (rc == DM_AI_DATA_AMBIGUOUS)
+          snprintf(reply, cap, "%s", "存在同名记录，不能确定删除哪一条。请按当前列表编号指定。");
+        else if (rc == DM_AI_DATA_BUSY)
+          snprintf(reply, cap, "%s", "该条提醒正在显示，请先结束提醒，再请求删除。");
+        else if (rc == DM_AI_DATA_CLOCK)
+          snprintf(reply, cap, "%s", "设备时间未校准，不能确定今日健康记录，未执行删除。");
+        else
+          snprintf(reply, cap, "%s", "删除范围或定位条件不支持，未修改任何记录。");
+        return rc;
       case INTENT_READ_LOCAL:
         rc = dm_ai_read_local(intent->read_kind, reply, cap);
         intent->operation_rc = rc;
@@ -1937,11 +2232,11 @@ static int run_intent(assistant_intent_t *intent, char *reply, size_t cap)
         if (rc != 0) snprintf(reply, cap, "%s", "本地记录读取失败，请稍后重试。");
         return rc;
       case INTENT_DELETE_UNSUPPORTED:
-        snprintf(reply, cap, "%s", "当前不支持通过 AI 删除数据，请在对应功能页面手动操作。");
+        snprintf(reply, cap, "%s", "请明确指定一条记录，例如“删除第2条备忘”“删除最近一条心情记录”。不支持模糊目标或批量删除；喝水可明确删除今天的杯数或今日累计。");
         return 0;
 
       case INTENT_CANCEL:
-        snprintf(reply, cap, "%s", "本次没有新建或修改记录。已有提醒请在列表中删除。");
+        snprintf(reply, cap, "%s", "本次没有新建、修改或删除记录。若要删除已有记录，请明确指定类别和编号。");
         return 0;
 
       case INTENT_MED_OPEN:
@@ -2334,13 +2629,17 @@ int dm_assistant_intent_try(const char *text, char *reply, int reply_cap)
           result = 1;
           if (s_intent.type == INTENT_WAKE) result = 2;
           else if (s_intent.type == INTENT_READ_LOCAL) result = 4;
+          else if (s_intent.type == INTENT_READ_HEALTH) result = 5;
           else if (s_intent.type == INTENT_FOCUS ||
+                   (s_intent.type == INTENT_DELETE_DATA && s_intent.deletion.kind >= DM_AI_DATA_MOOD) ||
                    s_intent.type == INTENT_MED_TAKE ||
                    s_intent.type == INTENT_MED_OPEN ||
                    s_intent.type == INTENT_MOOD_RECORD ||
                    s_intent.type == INTENT_MOOD) result = 3;
           if (result == 4 && !dm_ai_permission_allowed(DM_AI_READ_LOCAL_DATA))
             snprintf(reply, (size_t)reply_cap, "%s", "本地生活数据读取权限已关闭，内容不会返回。");
+          else if (result == 5 && !dm_ai_permission_allowed(DM_AI_READ_HEALTH))
+            snprintf(reply, (size_t)reply_cap, "%s", "读取健康记录权限已关闭，未返回已有健康数据。");
           else if (result == 3 && s_intent_rc != -2 &&
               !dm_ai_permission_allowed(DM_AI_READ_HEALTH))
             {

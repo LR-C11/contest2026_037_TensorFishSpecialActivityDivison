@@ -495,7 +495,9 @@ const char *dm_chat_ai_ask(const char *user_text)
       s_last_request_intent_ok = 1;
       s_last_reply_local = intent_result == 4;
       if (s_last_reply_local) return s_last_reply;
-      s_last_reply_health = intent_result == 3;
+      s_last_reply_health = intent_result == 3 || intent_result == 5;
+      /* Deterministic health queries never become model conversation facts. */
+      if (intent_result == 5) return s_last_reply;
       if (s_last_reply_health) dm_chat_hist_push_health(user_text, s_last_reply);
       else dm_chat_hist_push(user_text, s_last_reply);
       return s_last_reply;

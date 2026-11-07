@@ -11,6 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 AUDIT_STUB = r'''
 #include "dm_ai_log.h"
 #include "dm_ai_local_read.h"
+#include "dm_ai_data.h"
 static int audit_calls,audit_seconds,audit_rc;
 static dm_ai_log_action_t audit_action;
 static dm_ai_log_result_t audit_result;
@@ -85,6 +86,252 @@ class Regressions(unittest.TestCase):
         return (AUDIT_STUB + "typedef enum {" + ",".join(pages) + "} dm_page_t;\n" +
                 'int dm_med_voice_has_name(const char *s) '
                 '{return strstr(s,"布洛芬") != NULL;}\n' + part)
+
+    def data_helpers(self):
+        text = source("dm_ai_data.c")
+        return '#include "dm_ai_data.h"\n' + "\n".join(function(text, name) for name in (
+            "dm_ai_data_read_permission", "dm_ai_data_delete_permission",
+            "dm_ai_data_delete_allowed", "dm_ai_data_match")) + "\n"
+
+    def test_health_questions_are_local_and_deletes_are_exact_commands(self):
+        self.run_c(self.parser() + r'''
+int main(void){assistant_intent_t i;
+assert(parse_intent("喝了多少杯水",&i) && i.type==INTENT_READ_HEALTH && i.health_query==DM_AI_HEALTH_WATER);
+assert(parse_intent("我今天喝了几杯水？",&i) && i.type==INTENT_READ_HEALTH);
+assert(parse_intent("最近一条心情是什么时候",&i) && i.type==INTENT_READ_HEALTH && i.health_query==DM_AI_HEALTH_LAST_MOOD);
+assert(parse_intent("昨天喝了多少杯水",&i) && i.health_query==DM_AI_HEALTH_UNAVAILABLE);
+assert(parse_intent("我喝了多少毫升水",&i) && i.health_query==DM_AI_HEALTH_UNAVAILABLE);
+assert(parse_intent("我上次记录心情是什么时候？",&i) && i.type==INTENT_READ_HEALTH);
+assert(parse_intent("今天喝了多少杯水，还有最近一条心情是什么时候",&i) && i.type==INTENT_READ_HEALTH && i.health_query==DM_AI_HEALTH_WATER_AND_MOOD);
+assert(parse_intent("删除第2条备忘",&i) && i.type==INTENT_DELETE_DATA && i.deletion.kind==DM_AI_DATA_NOTE && i.deletion.number==2);
+assert(parse_intent("删除待办‘开会’",&i) && i.type==INTENT_DELETE_DATA && i.deletion.kind==DM_AI_DATA_TODO && !strcmp(i.deletion.title,"开会"));
+assert(parse_intent("请帮我删除闹钟\"起床\"",&i) && i.type==INTENT_DELETE_DATA && i.deletion.kind==DM_AI_DATA_ALARM);
+assert(parse_intent("删除倒数日“生日”",&i) && i.type==INTENT_DELETE_DATA && i.deletion.kind==DM_AI_DATA_COUNTDOWN);
+assert(parse_intent("删除最近一条心情记录",&i) && i.type==INTENT_DELETE_DATA && i.deletion.selector==DM_AI_SELECT_LATEST);
+assert(parse_intent("删除今天2杯喝水记录",&i) && i.type==INTENT_DELETE_DATA && i.deletion.number==2 && i.deletion.selector==DM_AI_SELECT_CUPS);
+assert(parse_intent("删除今天的喝水记录",&i) && i.type==INTENT_DELETE_DATA && i.deletion.selector==DM_AI_SELECT_TODAY);
+assert(parse_intent("删除服药记录‘维生素’",&i) && i.type==INTENT_DELETE_DATA && i.deletion.kind==DM_AI_DATA_MEDICATION);
+assert(parse_intent("删除今天维生素的服药记录",&i) && i.type==INTENT_DELETE_DATA && !strcmp(i.deletion.title,"维生素"));
+const char*invalid[]={"删除备忘","删除那个闹钟","删除所有备忘","清空心情记录","删除昨天的喝水记录",
+"删除今天第2条喝水记录","删除今天的备忘买牛奶","删除第1条备忘和第2条待办","如果删除第1条备忘",
+"可以删除第1条备忘吗","删除待办“开会”和“吃饭”","删除第99条备忘","删除今天2杯喝水记录和备忘"};
+for(unsigned n=0;n<sizeof(invalid)/sizeof(invalid[0]);n++){
+if(!parse_intent(invalid[n],&i) || i.type!=INTENT_DELETE_UNSUPPORTED){fprintf(stderr,"Unexpected deletion: %s type=%d\n",invalid[n],i.type);assert(0);}}
+const char*negative[]={"不要删除第1条备忘","别清空今天喝水记录","我不想删除第1条备忘","不能删除最近一条心情记录"};
+for(unsigned n=0;n<sizeof(negative)/sizeof(negative[0]);n++){
+assert(parse_intent(negative[n],&i) && i.type==INTENT_CANCEL);}
+assert(parse_intent("帮我记一下明天删除文件",&i) && i.type==INTENT_NOTE);
+return 0;}
+''')
+
+    def test_health_queries_read_real_values_and_revoke_before_return(self):
+        h = source("deskmate.h")
+        records = h[h.index("#define DM_M_JOY"):h.index("extern dm_ctx_t g_dm;")]
+        health = source("dm_ui_health.c")
+        state = health[health.index("typedef struct"):health.index("static lv_obj_t *s_page;")]
+        self.run_c('#include "dm_ai_data.h"\n' + records + state + r'''
+static bool allowed,clock_ready=true,revoke_during_read;static int reads,s_health_day_key=123;
+bool dm_ai_permission_allowed(dm_ai_permission_t p){(void)p;return allowed;}
+static int dm_wifi_clock_valid(void){return clock_ready;}
+static int health_today_key(void){return 123;}
+int dm_water_ai_cups(int *n){reads++;*n=3;if(revoke_during_read)allowed=false;return 0;}
+''' + function(health,"dm_health_ai_read") + "\n" +
+                   function(source("dm_ai_data.c"),"dm_ai_read_health") + r'''
+int main(void){char out[512]="OLD_SECRET";
+assert(dm_ai_read_health(DM_AI_HEALTH_WATER,out,sizeof(out))==-2 && !out[0] && !reads);
+allowed=true;assert(!dm_ai_read_health(DM_AI_HEALTH_WATER,out,sizeof(out)));
+assert(strstr(out,"3杯") && reads==1);
+s_rec_n=1;s_recs[0].hour=17;s_recs[0].min=23;s_recs[0].quick=1;
+assert(!dm_ai_read_health(DM_AI_HEALTH_LAST_MOOD,out,sizeof(out)));
+assert(strstr(out,"17:23") && strstr(out,"今天心情不错"));
+assert(!dm_ai_read_health(DM_AI_HEALTH_WATER_AND_MOOD,out,sizeof(out)));
+assert(strstr(out,"3杯") && strstr(out,"17:23"));
+s_rec_n=0;assert(!dm_ai_read_health(DM_AI_HEALTH_LAST_MOOD,out,sizeof(out)));
+assert(strstr(out,"没有保存") && !strstr(out,"17:23"));
+s_rec_n=1;s_health_day_key=122;
+assert(!dm_ai_read_health(DM_AI_HEALTH_LAST_MOOD,out,sizeof(out)) && strstr(out,"没有保存"));
+clock_ready=false;assert(dm_ai_read_health(DM_AI_HEALTH_WATER,out,sizeof(out))==-4);
+clock_ready=true;revoke_during_read=true;assert(dm_ai_read_health(DM_AI_HEALTH_WATER,out,sizeof(out))==-2 && !out[0]);
+return 0;}
+''')
+
+    def test_note_delete_requires_read_and_delete_and_rolls_back(self):
+        self.run_c(self.data_helpers() + r'''
+#define NOTE_MAX 8
+#define NOTE_LEN_MAX 32
+static char s_notes[8][32];static int s_note_n=3,s_note_sel=2,saves,paints,save_rc;
+static bool read_allowed=true,delete_allowed=true,master=true;
+bool dm_ai_permission_allowed(dm_ai_permission_t p)
+{return master && (p==DM_AI_READ_LOCAL_DATA?read_allowed:p==DM_AI_DELETE_LOCAL_DATA?delete_allowed:false);}
+static int note_save(void){saves++;return save_rc;}
+static void note_paint(void){paints++;}
+''' + function(source("dm_ui_note.c"),"dm_note_ai_delete") + r'''
+int main(void){dm_ai_delete_request_t r={.kind=DM_AI_DATA_NOTE,.selector=DM_AI_SELECT_TITLE};
+strcpy(s_notes[0],"买牛奶");strcpy(s_notes[1],"开会");strcpy(s_notes[2],"开会");strcpy(r.title,"开会");
+assert(dm_note_ai_delete(&r)==-6 && !saves && s_note_n==3);
+r.selector=DM_AI_SELECT_INDEX;r.number=2;read_allowed=false;
+assert(dm_note_ai_delete(&r)==-2 && !saves && s_note_n==3);
+read_allowed=true;delete_allowed=false;assert(dm_note_ai_delete(&r)==-2 && !saves);
+delete_allowed=true;master=false;assert(dm_note_ai_delete(&r)==-2 && !saves);master=true;
+save_rc=-1;assert(dm_note_ai_delete(&r)==-3 && s_note_n==3 && s_note_sel==2 && !paints);
+assert(!strcmp(s_notes[0],"买牛奶") && !strcmp(s_notes[2],"开会"));
+save_rc=0;assert(!dm_note_ai_delete(&r) && s_note_n==2 && paints==1);
+assert(!strcmp(s_notes[1],"开会") && !s_notes[2][0]);r.number=8;
+assert(dm_note_ai_delete(&r)==-5 && s_note_n==2);return 0;}
+''')
+
+    def test_delete_controller_checks_both_permissions_for_every_category(self):
+        implementation = source("dm_ai_data.c").replace("#include <nuttx/config.h>", "")
+        self.run_c('#define CONFIG_DESKMATE_APP 1\n' + implementation + r'''
+static bool master=true,read_allowed=true,delete_allowed=true;static int calls,kind_seen;
+bool dm_ai_permission_allowed(dm_ai_permission_t p)
+{if(p<0||p>=DM_AI_PERMISSION_COUNT)return false;
+return master && ((p==DM_AI_READ_HEALTH||p==DM_AI_READ_LOCAL_DATA)?read_allowed:delete_allowed);}
+static int operation(const dm_ai_delete_request_t*r){calls++;kind_seen=r->kind;return 0;}
+int dm_note_ai_delete(const dm_ai_delete_request_t*r){return operation(r);}
+int dm_reminder_ai_delete(const dm_ai_delete_request_t*r){return operation(r);}
+int dm_countdown_ai_delete(const dm_ai_delete_request_t*r){return operation(r);}
+int dm_health_ai_delete(const dm_ai_delete_request_t*r){return operation(r);}
+int dm_water_ai_delete(const dm_ai_delete_request_t*r){return operation(r);}
+int dm_med_ai_delete(const dm_ai_delete_request_t*r){return operation(r);}
+int dm_health_ai_read(dm_ai_health_query_t q,char*out,size_t cap)
+{(void)q;(void)out;(void)cap;return 0;}
+int main(void){dm_ai_delete_request_t r;
+for(int k=0;k<DM_AI_DATA_COUNT;k++){
+memset(&r,0,sizeof(r));r.kind=k;r.selector=k==DM_AI_DATA_WATER?DM_AI_SELECT_TODAY:DM_AI_SELECT_INDEX;r.number=1;
+read_allowed=false;calls=0;assert(dm_ai_delete_data(&r)==-2 && !calls);
+read_allowed=true;delete_allowed=false;assert(dm_ai_delete_data(&r)==-2 && !calls);
+delete_allowed=true;master=false;assert(dm_ai_delete_data(&r)==-2 && !calls);
+master=true;assert(!dm_ai_delete_data(&r) && calls==1 && kind_seen==k);}
+r.kind=DM_AI_DATA_NOTE;r.selector=DM_AI_SELECT_INDEX;r.number=0;
+calls=0;assert(dm_ai_delete_data(&r)==-1 && !calls);
+r.selector=DM_AI_SELECT_TITLE;memset(r.title,'A',sizeof(r.title));
+assert(dm_ai_delete_data(&r)==-1 && !calls);r.selector=DM_AI_SELECT_TODAY;
+assert(dm_ai_delete_data(&r)==-1 && !calls);return 0;}
+''')
+
+    def test_reminder_delete_uses_visible_indices_and_preserves_active_alert(self):
+        text = source("dm_ui_remind.c")
+        types = text[text.index("typedef enum"):text.index("typedef struct\n{\n  int is_alarm;")]
+        self.run_c(self.data_helpers() + '#define REMINDER_TEXT_MAX 64\n' + types + r'''
+#define REMINDER_MAX 12
+static reminder_t s_items[12];static int s_count=4,s_alert_idx=2,s_todo_sel,s_alarm_sel;
+static int save_rc,saves,paints;static bool allowed=true;
+bool dm_ai_permission_allowed(dm_ai_permission_t p){(void)p;return allowed;}
+static int reminder_save(void){saves++;return save_rc;}
+static void reminder_paint(void){paints++;}
+''' + function(text,"dm_reminder_ai_delete") + r'''
+int main(void){dm_ai_delete_request_t r={.kind=DM_AI_DATA_TODO,.selector=DM_AI_SELECT_INDEX,.number=1};
+strcpy(s_items[0].text,"completed");s_items[0].fired=1;
+strcpy(s_items[1].text,"task");strcpy(s_items[2].text,"ringing");
+s_items[3].type=REMINDER_ALARM;strcpy(s_items[3].text,"alarm");
+allowed=false;assert(dm_reminder_ai_delete(&r)==-2 && !saves);allowed=true;
+save_rc=-1;assert(dm_reminder_ai_delete(&r)==-3 && s_count==4 && s_alert_idx==2 && !paints);
+assert(!strcmp(s_items[1].text,"task"));save_rc=0;
+assert(!dm_reminder_ai_delete(&r) && s_count==3 && s_alert_idx==1);
+assert(dm_reminder_ai_delete(&r)==-7 && s_count==3);
+r.kind=DM_AI_DATA_ALARM;assert(!dm_reminder_ai_delete(&r) && s_count==2);
+assert(!strcmp(s_items[s_alert_idx].text,"ringing"));return 0;}
+''')
+
+    def test_countdown_delete_rolls_back_and_preserves_alert_index(self):
+        self.run_c(self.data_helpers() + r'''
+#define CD_MAX 8
+typedef struct{char name[48];int y,m,d,hour,minute,has_alarm;} cd_item_t;
+static cd_item_t s_cd[8];static int s_cd_n=3,s_cd_sel=2,s_cd_alert_idx=2,save_rc,saves;
+static bool allowed=true;
+bool dm_ai_permission_allowed(dm_ai_permission_t p){(void)p;return allowed;}
+static int cd_save(void){saves++;return save_rc;}
+static void cd_paint(void){}
+''' + function(source("dm_ui_life.c"),"dm_countdown_ai_delete") + r'''
+int main(void){dm_ai_delete_request_t r={.kind=DM_AI_DATA_COUNTDOWN,.selector=DM_AI_SELECT_INDEX,.number=1};
+strcpy(s_cd[0].name,"first");strcpy(s_cd[1].name,"second");strcpy(s_cd[2].name,"ringing");
+allowed=false;assert(dm_countdown_ai_delete(&r)==-2 && !saves);allowed=true;
+save_rc=-1;assert(dm_countdown_ai_delete(&r)==-3 && s_cd_n==3 && s_cd_sel==2 && s_cd_alert_idx==2);
+assert(!strcmp(s_cd[0].name,"first"));save_rc=0;
+assert(!dm_countdown_ai_delete(&r) && s_cd_n==2 && s_cd_alert_idx==1);
+r.number=2;assert(dm_countdown_ai_delete(&r)==-7);
+assert(!strcmp(s_cd[1].name,"ringing"));return 0;}
+''')
+
+    def test_health_delete_does_not_read_when_denied_or_remove_other_statistics(self):
+        h = source("deskmate.h")
+        records = h[h.index("#define DM_M_JOY"):h.index("extern dm_ctx_t g_dm;")]
+        self.run_c(self.data_helpers() + records + r'''
+static dm_mood_rec_t s_recs[8];static int s_rec_n=2,s_health_day_key=123,saves,save_rc;
+static bool allowed=true,clock_ready=true;
+bool dm_ai_permission_allowed(dm_ai_permission_t p){(void)p;return allowed;}
+static int dm_wifi_clock_valid(void){return clock_ready;}
+static int health_today_key(void){return 123;}
+static int store_save(void){saves++;return save_rc;}
+static void dm_health_refresh(void){}
+''' + function(source("dm_ui_health.c"),"dm_health_ai_delete") + r'''
+int main(void){dm_ai_delete_request_t r={.kind=DM_AI_DATA_MOOD,.selector=DM_AI_SELECT_LATEST};
+s_recs[0].hour=18;s_recs[1].hour=11;
+allowed=false;assert(dm_health_ai_delete(&r)==-2 && !saves);allowed=true;
+clock_ready=false;assert(dm_health_ai_delete(&r)==-4 && !saves);clock_ready=true;
+save_rc=-1;assert(dm_health_ai_delete(&r)==-3 && s_rec_n==2 && s_recs[0].hour==18);
+save_rc=0;assert(!dm_health_ai_delete(&r) && s_rec_n==1 && s_recs[0].hour==11);
+s_health_day_key=122;assert(dm_health_ai_delete(&r)==-5 && s_rec_n==1);
+return 0;}
+''')
+
+    def test_water_delete_is_atomic_and_does_not_invent_per_cup_history(self):
+        text = source("dm_ui_life.c")
+        self.run_c(self.data_helpers() + r'''
+#include <sys/stat.h>
+#define WATER_PATH "water.txt"
+static int s_w_cups=4,s_w_interval=45,s_w_left=50,s_w_day=123,paints;
+static time_t s_w_due;static bool s_w_alert_on,allowed=true,clock_ready=true;
+bool dm_ai_permission_allowed(dm_ai_permission_t p){(void)p;return allowed;}
+static int dm_wifi_clock_valid(void){return clock_ready;}
+static int today_yday(void){return 123;}
+static void water_paint(void){paints++;}
+static void dm_health_refresh(void){}
+''' + function(text,"water_save") + "\n" + function(text,"dm_water_ai_cups") + "\n" +
+                   function(text,"dm_water_ai_delete") + r'''
+int main(void){int cups=999;dm_ai_delete_request_t r={.kind=DM_AI_DATA_WATER,.selector=DM_AI_SELECT_CUPS,.number=2};
+allowed=false;assert(dm_water_ai_cups(&cups)==-2 && cups==999);
+assert(dm_water_ai_delete(&r)==-2 && s_w_cups==4);allowed=true;
+FILE*f=fopen(WATER_PATH,"w");fputs("ORIGINAL",f);fclose(f);
+assert(mkdir(WATER_PATH ".tmp",0700)==0);
+assert(dm_water_ai_delete(&r)==-3 && s_w_cups==4 && !paints);
+char saved[32];f=fopen(WATER_PATH,"r");assert(fgets(saved,sizeof(saved),f));fclose(f);
+assert(!strcmp(saved,"ORIGINAL"));assert(rmdir(WATER_PATH ".tmp")==0);
+r.selector=DM_AI_SELECT_INDEX;r.number=1;assert(dm_water_ai_delete(&r)==-8 && s_w_cups==4);
+r.selector=DM_AI_SELECT_CUPS;r.number=5;assert(dm_water_ai_delete(&r)==-5);
+r.number=2;assert(!dm_water_ai_delete(&r) && s_w_cups==2);
+s_w_day=122;assert(!dm_water_ai_cups(&cups) && cups==0);
+assert(dm_water_ai_delete(&r)==-5 && s_w_cups==2);s_w_day=123;
+r.selector=DM_AI_SELECT_TODAY;assert(!dm_water_ai_delete(&r) && s_w_cups==0);
+return 0;}
+''')
+
+    def test_medication_delete_only_clears_named_drugs_today_checkins(self):
+        text = source("dm_ui_med.c")
+        record = re.search(r"typedef struct\s*\{[^}]+\}\s*med_item_t;", text).group()
+        self.run_c(self.data_helpers() + '#define MED_NAME_MAX 32\n' + record + r'''
+static med_item_t s_med[8];static int s_med_n=2,save_rc,saves;
+static bool allowed=true;
+bool dm_ai_permission_allowed(dm_ai_permission_t p){(void)p;return allowed;}
+static int dm_wifi_clock_valid(void){return 1;}
+static int med_today(void){return 123;}
+static int med_save(void){saves++;return save_rc;}
+static void med_paint(void){}
+static void dm_health_refresh(void){}
+''' + function(text,"dm_med_ai_delete") + r'''
+int main(void){dm_ai_delete_request_t r={.kind=DM_AI_DATA_MEDICATION,.selector=DM_AI_SELECT_TITLE};
+strcpy(r.title,"维生素");strcpy(s_med[0].name,"维生素");strcpy(s_med[1].name,"胃药");
+s_med[0].taken=3;s_med[0].times=2;s_med[0].hours[0]=8;s_med[0].hours[1]=18;
+s_med[0].day=123;s_med[1].taken=1;s_med[1].day=123;
+allowed=false;assert(dm_med_ai_delete(&r)==-2 && !saves);allowed=true;
+save_rc=-1;assert(dm_med_ai_delete(&r)==-3 && s_med[0].taken==3);save_rc=0;
+assert(!dm_med_ai_delete(&r) && s_med[0].taken==0 && s_med_n==2 && s_med[1].taken==1);
+assert(!strcmp(s_med[0].name,"维生素") && s_med[0].times==2 && s_med[0].hours[1]==18);
+assert(dm_med_ai_delete(&r)==-5);
+s_med[0].taken=1;strcpy(s_med[1].name,"维生素");assert(dm_med_ai_delete(&r)==-6);
+return 0;}
+''')
 
     def test_voice_routing_and_negative_commands(self):
         cases = {
@@ -283,7 +530,7 @@ assert(parse_intent("我有哪些待办？",&i) && i.type==INTENT_READ_LOCAL && 
 assert(parse_intent("查看闹钟列表",&i) && i.type==INTENT_READ_LOCAL && i.read_kind==DM_AI_READ_ALARMS);
 assert(parse_intent("查询倒数日",&i) && i.type==INTENT_READ_LOCAL && i.read_kind==DM_AI_READ_COUNTDOWNS);
 assert(parse_intent("不要读取备忘",&i) && i.type==INTENT_CANCEL);
-assert(parse_intent("删除备忘内容",&i) && i.type==INTENT_DELETE_UNSUPPORTED);
+assert(parse_intent("删除备忘内容",&i) && i.type==INTENT_DELETE_DATA);
 assert(parse_intent("帮我记一下wifi密码是12345678",&i) && i.type==INTENT_NOTE);
 return 0;}
 ''')
@@ -341,12 +588,61 @@ dm_assistant_intent_tick();pthread_join(th,0);
 assert(strstr(answer,"关闭") && !strstr(answer,"LOCAL_LIFE_SECRET"));return 0;}
 ''')
 
+    def test_revoked_health_query_is_suppressed_before_worker_receives_it(self):
+        text = source("dm_assistant.c")
+        self.run_c(self.parser() + r'''
+static bool allowed=true;static char answer[512];
+bool dm_ai_permission_allowed(dm_ai_permission_t p){(void)p;return allowed;}
+static int run_intent(assistant_intent_t*i,char*out,size_t cap)
+{(void)i;snprintf(out,cap,"LOCAL_HEALTH_SECRET");allowed=false;return 0;}
+''' + function(text,"dm_assistant_intent_try") + "\n" +
+            function(text,"dm_assistant_intent_tick") + r'''
+static void*request(void*p){(void)p;
+assert(dm_assistant_intent_try("最近一条心情是什么时候",answer,sizeof(answer))==5);return NULL;}
+int main(void){pthread_t th;int active;pthread_create(&th,0,request,0);
+do{pthread_mutex_lock(&s_intent_lock);active=s_intent_active;pthread_mutex_unlock(&s_intent_lock);}while(!active);
+dm_assistant_intent_tick();pthread_join(th,0);
+assert(strstr(answer,"关闭") && !strstr(answer,"LOCAL_HEALTH_SECRET"));return 0;}
+''')
+
+    def test_health_http_body_is_not_sent_when_permission_changes_during_wait(self):
+        text = source("dm_voice.c")
+        self.run_c(r'''
+#include "dm_ai_permissions.h"
+#include "dm_voice.h"
+#define JSON_REQ "request.json"
+#define VOICE_BASE "mock://api"
+#define VOICE_WIFI_WAIT_SEC 10
+static dm_voice_failure_t s_last_failure;
+static bool allowed=true,revoke_during_wait;static int uploads,permission_checks,revoke_on_check;
+bool dm_ai_permission_allowed(dm_ai_permission_t p)
+{(void)p;if(++permission_checks==revoke_on_check)allowed=false;return allowed;}
+static int dm_wifi_connected(void){return 1;}
+static int voice_wait_for_wifi(void){return 0;}
+static int dm_wifi_wait_time_sync(int t){(void)t;if(revoke_during_wait)allowed=false;return 0;}
+static int run_curl_command(const char*u,const char*p,const char*r,int t)
+{(void)u;(void)p;(void)r;(void)t;uploads++;return 0;}
+''' + function(text,"http_post_json_checked") + "\n" +
+                   function(text,"http_post_json") + r'''
+int main(void){revoke_during_wait=true;
+assert(http_post_json_checked("/tts","LOCAL_HEALTH_SECRET","response.json",true)==-2);
+assert(!uploads && access(JSON_REQ,F_OK)!=0);
+/* A revocation after body creation must still block the network call. */
+revoke_during_wait=false;allowed=true;permission_checks=0;revoke_on_check=2;
+assert(http_post_json_checked("/tts","LOCAL_HEALTH_SECRET","response.json",true)==-2);
+assert(!uploads && access(JSON_REQ,F_OK)!=0);
+/* User-supplied audio and ordinary chat remain usable with health off. */
+assert(!http_post_json("/asr","USER_PROVIDED_AUDIO","response.json") && uploads==1);
+allowed=true;revoke_on_check=0;assert(!http_post_json_checked("/tts","ALLOWED_HEALTH","response.json",true));
+assert(uploads==2);return 0;}
+''')
+
     def test_life_read_result_is_hidden_after_permission_is_switched_off(self):
         self.run_c(r'''
 #include "dm_ai_permissions.h"
 #define FACE_HAPPY 1
 #define EYE_DECOR_NONE 0
-static bool allowed,s_last_ans_local,s_out_local,s_ui_rec,s_busy;
+static bool allowed,s_last_ans_local,s_out_local,s_ui_rec,s_busy,s_out_health,s_last_ans_health;
 static int s_out_ready,s_rec_sec,s_mic_err;static uint64_t s_rec_started_ms;
 static char s_out_ans[224],s_out_sub[80],shown[512];
 bool dm_ai_permission_allowed(dm_ai_permission_t p){(void)p;return allowed;}
@@ -363,7 +659,12 @@ int main(void){s_out_local=true;s_out_ready=1;strcpy(s_out_ans,"LOCAL_SECRET");
 dm_chat_tick();assert(!strstr(shown,"LOCAL_SECRET") && !strstr(s_out_ans,"LOCAL_SECRET"));
 allowed=true;s_out_ready=1;strcpy(s_out_ans,"LOCAL_SECRET");
 dm_chat_tick();assert(strstr(shown,"LOCAL_SECRET"));
-allowed=false;dm_chat_tick();assert(!strstr(shown,"LOCAL_SECRET"));return 0;}
+allowed=false;dm_chat_tick();assert(!strstr(shown,"LOCAL_SECRET"));
+s_out_local=false;s_out_health=true;s_out_ready=1;strcpy(s_out_ans,"HEALTH_SECRET");
+dm_chat_tick();assert(!strstr(shown,"HEALTH_SECRET") && !strstr(s_out_ans,"HEALTH_SECRET"));
+allowed=true;s_out_ready=1;strcpy(s_out_ans,"HEALTH_SECRET");dm_chat_tick();
+assert(strstr(shown,"HEALTH_SECRET"));allowed=false;dm_chat_tick();
+assert(!strstr(shown,"HEALTH_SECRET"));return 0;}
 ''')
 
     def test_old_log_permission_sentinel_does_not_become_a_denial(self):
@@ -886,7 +1187,9 @@ return 0;}
         for page in extra_pages:
             if page not in parser.split("} dm_page_t;")[0]:
                 parser = parser.replace("} dm_page_t;", "," + page + "} dm_page_t;")
-        functions = (function(text, "intent_permission") + "\n" +
+        functions = (function(source("dm_ai_data.c"), "dm_ai_data_read_permission") + "\n" +
+                     function(source("dm_ai_data.c"), "dm_ai_data_delete_permission") + "\n" +
+                     function(text, "intent_permission") + "\n" +
                      function(text, "intent_check_permission") + "\n" +
                      function(text, "run_intent"))
         self.run_c('#include "dm_ai_permissions.h"\n' + parser + r'''
@@ -899,6 +1202,10 @@ static int dm_show(){effects++;return 0;}
 static int dm_focus_start_seconds(){effects++;return 0;}
 int dm_ai_read_local(dm_ai_read_kind_t k,char *out,size_t cap)
 {(void)k;effects++;snprintf(out,cap,"LOCAL_RECORD_SECRET");return 0;}
+int dm_ai_read_health(dm_ai_health_query_t q,char *out,size_t cap)
+{(void)q;effects++;snprintf(out,cap,"HEALTH_RECORD_SECRET");return backend_rc;}
+int dm_ai_delete_data(const dm_ai_delete_request_t *r)
+{(void)r;effects++;return backend_rc;}
 static int dm_todo_add_voice(const char *name,int delay)
 {effects++;todo_saves++;todo_delay=delay;snprintf(todo_title,sizeof(todo_title),"%s",name);return backend_rc;}
 static int dm_todo_add_at_voice(){effects++;return 0;}
@@ -959,6 +1266,26 @@ assert(run_intent(&intent,reply,sizeof(reply))==-2 && effects==0);
 intent.type=INTENT_DELETE_UNSUPPORTED;
 assert(run_intent(&intent,reply,sizeof(reply))==0 && effects==0);
 assert(strstr(reply,"不支持"));
+allowed[DM_AI_LOCAL]=true;allowed[DM_AI_OPEN_APPS]=false;
+for(int kind=0;kind<DM_AI_DATA_COUNT;kind++){
+memset(&intent,0,sizeof(intent));intent.type=INTENT_DELETE_DATA;intent.deletion.kind=kind;
+dm_ai_permission_t read=dm_ai_data_read_permission(kind),del=dm_ai_data_delete_permission(kind);
+allowed[read]=false;effects=0;
+assert(run_intent(&intent,reply,sizeof(reply))==-2 && !effects);
+record_intent_result(&intent,-2,reply);assert(audit_permission==read);
+allowed[read]=true;allowed[del]=false;
+assert(run_intent(&intent,reply,sizeof(reply))==-2 && !effects);allowed[del]=true;
+assert(!run_intent(&intent,reply,sizeof(reply)) && effects==1);
+backend_rc=-3;assert(run_intent(&intent,reply,sizeof(reply))==-3);
+record_intent_result(&intent,-3,reply);
+assert(audit_result==DM_AI_LOG_FAILED && audit_reason==DM_AI_LOG_REASON_SAVE);
+assert(audit_action==DM_AI_LOG_DELETE_NOTE+kind);backend_rc=0;
+}
+memset(&intent,0,sizeof(intent));intent.type=INTENT_READ_HEALTH;effects=0;
+allowed[DM_AI_READ_HEALTH]=false;
+assert(run_intent(&intent,reply,sizeof(reply))==-2 && !effects);
+allowed[DM_AI_READ_HEALTH]=true;
+assert(!run_intent(&intent,reply,sizeof(reply)) && effects==1);
 return 0;}
 ''')
 
@@ -1018,7 +1345,8 @@ static pthread_mutex_t s_voice_api_lock=PTHREAD_MUTEX_INITIALIZER;
 static bool allowed;
 static int uploads;
 bool dm_ai_permission_allowed(dm_ai_permission_t p){(void)p;return allowed;}
-static int voice_tts_play_unlocked(const char *text){(void)text;uploads++;return 0;}
+static int voice_tts_play_unlocked(const char *text,bool health)
+{(void)text;if(health)assert(allowed);uploads++;return 0;}
 ''' + function(text, "dm_voice_tts_play_private") + "\n" +
                    function(text, "dm_voice_tts_play") + r'''
 int main(void){assert(dm_voice_tts_play_private("本地健康记录")==2);
@@ -1056,7 +1384,7 @@ assert(strstr(message,"保存失败"));return 0;}
 #include "dm_ai_permissions.h"
 #include "dm_voice.h"
 #define WAV_TTS "voice-out.wav"
-static int s_st,handled,asr_calls,chat_calls,tts_calls,hist_calls;
+static int s_st,handled,asr_calls,chat_calls,tts_calls,hist_calls,s_health_reply;
 static dm_voice_failure_t s_last_failure;
 static bool health_allowed;
 bool dm_ai_permission_allowed(dm_ai_permission_t p){(void)p;return health_allowed;}
@@ -1071,8 +1399,8 @@ static int chat_reply(const char *s,char *r,int cap,bool *private_context)
 {(void)s;*private_context=false;chat_calls++;snprintf(r,cap,"普通聊天回复");return 0;}
 static int voice_play_wake_samples_unlocked(void){return 0;}
 static const char *dm_voice_profile_api_id(void){return "voice";}
-static int tts_synth(const char *s,const char *p,const char *v)
-{(void)s;(void)p;(void)v;tts_calls++;return 0;}
+static int tts_synth(const char *s,const char *p,const char *v,bool health)
+{(void)s;(void)p;(void)v;if(health)assert(health_allowed);tts_calls++;return 0;}
 static int play_wav(const char *p){(void)p;return 0;}
 ''' + function(source("dm_voice.c"), "voice_asr_chat_tts_unlocked") + r'''
 int main(void){char reply[512];
@@ -1086,7 +1414,11 @@ assert(voice_asr_chat_tts_unlocked("user-audio.wav",reply,sizeof(reply))==0);
 assert(tts_calls==2);
 handled=4;
 assert(voice_asr_chat_tts_unlocked("user-audio.wav",reply,sizeof(reply))==3);
-assert(tts_calls==2 && hist_calls==2 && chat_calls==1);return 0;}
+assert(tts_calls==2 && hist_calls==2 && chat_calls==1);
+handled=5;assert(voice_asr_chat_tts_unlocked("query.wav",reply,sizeof(reply))==0);
+assert(s_health_reply && tts_calls==3 && hist_calls==2 && chat_calls==1);
+health_allowed=false;assert(voice_asr_chat_tts_unlocked("query.wav",reply,sizeof(reply))==2);
+assert(tts_calls==3 && hist_calls==2 && chat_calls==1);return 0;}
 ''')
 
     def test_actual_chat_body_omits_old_local_health_context(self):
@@ -1108,7 +1440,7 @@ static const char *local_reply(const char *s){(void)s;return "fallback";}
 static int dm_wifi_connected(void){return 1;}
 static int dm_wifi_wait_time_sync(int t){(void)t;return 0;}
 static int dm_assistant_intent_try(const char *s,char *r,int cap)
-{(void)s;if(local_mode){snprintf(r,cap,"LOCAL_LIFE_RECORD_SECRET");return 4;}return 0;}
+{(void)s;if(local_mode){snprintf(r,cap,local_mode==2?"LOCAL_HEALTH_QUERY_SECRET":"LOCAL_LIFE_RECORD_SECRET");return local_mode==2?5:4;}return 0;}
 static int run_curl_command(const char *url,const char *request,const char *response,int timeout)
 {(void)url;(void)response;(void)timeout;FILE *f=fopen(request,"r");assert(f);
 size_t n=fread(sent,1,sizeof(sent)-1,f);sent[n]=0;fclose(f);requests++;return 0;}
@@ -1129,8 +1461,11 @@ local_mode=1;assert(strstr(dm_chat_ai_ask("读一下备忘"),"LOCAL_LIFE_RECORD_
 assert(dm_chat_ai_local_reply() && requests==2);
 char history_json[4096];dm_chat_hist_json(history_json,sizeof(history_json));
 assert(!strstr(history_json,"LOCAL_LIFE_RECORD_SECRET"));
+local_mode=2;assert(strstr(dm_chat_ai_ask("最近心情什么时候"),"LOCAL_HEALTH_QUERY_SECRET"));
+assert(s_last_reply_health && !dm_chat_ai_local_reply() && requests==2);
+dm_chat_hist_json(history_json,sizeof(history_json));assert(!strstr(history_json,"LOCAL_HEALTH_QUERY_SECRET"));
 local_mode=0;dm_chat_ai_ask("继续聊天");
-assert(requests==3 && !strstr(sent,"LOCAL_LIFE_RECORD_SECRET"));return 0;}
+assert(requests==3 && !strstr(sent,"LOCAL_LIFE_RECORD_SECRET") && !strstr(sent,"LOCAL_HEALTH_QUERY_SECRET"));return 0;}
 ''')
 
     def test_malformed_permission_masks_cannot_grant_access(self):

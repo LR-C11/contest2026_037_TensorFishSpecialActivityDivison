@@ -5,6 +5,7 @@
 #include "dm_voice.h"
 #include "dm_ai_permissions.h"
 #include "dm_ai_local_read.h"
+#include "dm_ai_data.h"
 
 #ifdef CONFIG_DESKMATE_APP
 
@@ -525,6 +526,44 @@ static void reminder_delete(int type)
   s_todo_sel = -1;
   s_alarm_sel = -1;
   reminder_paint();
+}
+
+int dm_reminder_ai_delete(const dm_ai_delete_request_t *request)
+{
+  reminder_t previous[REMINDER_MAX];
+  int i, visible = 0, found = -1, type, old_count;
+  if (!request || (request->kind != DM_AI_DATA_TODO &&
+                   request->kind != DM_AI_DATA_ALARM)) return DM_AI_DATA_INVALID;
+  if (!dm_ai_data_delete_allowed(request->kind)) return DM_AI_DATA_DENIED;
+  type = request->kind == DM_AI_DATA_ALARM ? REMINDER_ALARM : REMINDER_TODO;
+  for (i = 0; i < s_count; i++)
+    if (s_items[i].type == type && (!s_items[i].fired || s_items[i].pending))
+      {
+        visible++;
+        if (dm_ai_data_match(request, s_items[i].text, visible))
+          {
+            if (found >= 0) return DM_AI_DATA_AMBIGUOUS;
+            found = i;
+          }
+      }
+  if (found < 0) return DM_AI_DATA_NOT_FOUND;
+  if (found == s_alert_idx) return DM_AI_DATA_BUSY;
+  if (!dm_ai_data_delete_allowed(request->kind)) return DM_AI_DATA_DENIED;
+  memcpy(previous, s_items, sizeof(previous));
+  old_count = s_count;
+  for (i = found; i + 1 < s_count; i++) s_items[i] = s_items[i + 1];
+  s_count--;
+  memset(&s_items[s_count], 0, sizeof(s_items[s_count]));
+  if (reminder_save() != 0)
+    {
+      memcpy(s_items, previous, sizeof(previous));
+      s_count = old_count;
+      return DM_AI_DATA_SAVE;
+    }
+  if (s_alert_idx > found) s_alert_idx--;
+  s_todo_sel = s_alarm_sel = -1;
+  reminder_paint();
+  return 0;
 }
 
 static void todo_delete_cb(lv_event_t *e)

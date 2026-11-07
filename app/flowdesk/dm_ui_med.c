@@ -6,6 +6,7 @@
  ****************************************************************************/
 
 #include "deskmate.h"
+#include "dm_ai_data.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -624,6 +625,34 @@ static void med_del_cb(lv_event_t *e)
       if (s_med_tip) lv_label_set_text(s_med_tip, "删除未保存，请重试");
     }
   med_paint();
+}
+
+int dm_med_ai_delete(const dm_ai_delete_request_t *request)
+{
+  med_item_t previous;
+  int i, found = -1;
+  if (!request || request->kind != DM_AI_DATA_MEDICATION) return DM_AI_DATA_INVALID;
+  if (!dm_ai_data_delete_allowed(DM_AI_DATA_MEDICATION)) return DM_AI_DATA_DENIED;
+  if (!dm_wifi_clock_valid()) return DM_AI_DATA_CLOCK;
+  if (request->selector != DM_AI_SELECT_TITLE &&
+      request->selector != DM_AI_SELECT_INDEX) return DM_AI_DATA_UNSUPPORTED;
+  for (i = 0; i < s_med_n; i++)
+    if (dm_ai_data_match(request, s_med[i].name, i + 1))
+      {
+        if (found >= 0) return DM_AI_DATA_AMBIGUOUS;
+        found = i;
+      }
+  if (found < 0 || s_med[found].day != (uint16_t)med_today() ||
+      !s_med[found].taken) return DM_AI_DATA_NOT_FOUND;
+  if (!dm_ai_data_delete_allowed(DM_AI_DATA_MEDICATION)) return DM_AI_DATA_DENIED;
+  previous = s_med[found];
+  /* Delete this drug's today's check-ins, preserving the drug and schedule. */
+  s_med[found].taken = 0;
+  if (med_save() != 0)
+    { s_med[found] = previous; return DM_AI_DATA_SAVE; }
+  med_paint();
+  dm_health_refresh();
+  return 0;
 }
 
 static void med_kb_back_cb(lv_event_t *e);

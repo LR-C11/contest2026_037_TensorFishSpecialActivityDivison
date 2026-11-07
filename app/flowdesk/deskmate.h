@@ -13,7 +13,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.19.1"
+#define DM_VER "0.20.0"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -270,7 +270,8 @@ void dm_proactive_focus_done(int32_t minutes);
 int dm_dict_ai_define(const char *word, char *out, int cap);
 void dm_chat_tick(void);
 void dm_assistant_intent_tick(void);
-/* Positive: 1=local, 2=wake, 3=health, 4=life records (never cloud history/TTS). */
+/* Positive: 1=local, 2=wake, 3=health, 4=life records (no history/TTS),
+ * 5=deterministic health query (no history; TTS requires health read access). */
 int dm_assistant_intent_try(const char *text, char *reply, int reply_cap);
 void dm_volume_tick(void);
 int dm_chat_ai_available(void);

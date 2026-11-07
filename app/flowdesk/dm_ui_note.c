@@ -8,6 +8,7 @@
 #include "deskmate.h"
 #include "dm_pinyin.h"
 #include "dm_ai_local_read.h"
+#include "dm_ai_data.h"
 #include "dm_ai_permissions.h"
 #include <stdio.h>
 #include <unistd.h>
@@ -232,6 +233,39 @@ int dm_note_ai_snapshot(dm_ai_local_record_t *out, int cap)
       snprintf(out[i].title, sizeof(out[i].title), "%s", s_notes[i]);
     }
   return n;
+}
+
+int dm_note_ai_delete(const dm_ai_delete_request_t *request)
+{
+  char previous[NOTE_MAX][NOTE_LEN_MAX];
+  int i, found = -1, old_n, old_sel;
+  if (!request || request->kind != DM_AI_DATA_NOTE) return DM_AI_DATA_INVALID;
+  if (!dm_ai_data_delete_allowed(DM_AI_DATA_NOTE)) return DM_AI_DATA_DENIED;
+  for (i = 0; i < s_note_n; i++)
+    if (dm_ai_data_match(request, s_notes[i], i + 1))
+      {
+        if (found >= 0) return DM_AI_DATA_AMBIGUOUS;
+        found = i;
+      }
+  if (found < 0) return DM_AI_DATA_NOT_FOUND;
+  if (!dm_ai_data_delete_allowed(DM_AI_DATA_NOTE)) return DM_AI_DATA_DENIED;
+  memcpy(previous, s_notes, sizeof(previous));
+  old_n = s_note_n;
+  old_sel = s_note_sel;
+  for (i = found; i + 1 < s_note_n; i++)
+    memcpy(s_notes[i], s_notes[i + 1], NOTE_LEN_MAX);
+  s_note_n--;
+  memset(s_notes[s_note_n], 0, NOTE_LEN_MAX);
+  s_note_sel = s_note_n ? (found < s_note_n ? found : s_note_n - 1) : 0;
+  if (note_save() != 0)
+    {
+      memcpy(s_notes, previous, sizeof(previous));
+      s_note_n = old_n;
+      s_note_sel = old_sel;
+      return DM_AI_DATA_SAVE;
+    }
+  note_paint();
+  return 0;
 }
 
 static void note_load(void)

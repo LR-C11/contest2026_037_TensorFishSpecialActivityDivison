@@ -27,8 +27,10 @@ static const char *const s_details[DM_AI_PERMISSION_COUNT] = {
   "允许 AI 打开 24 点游戏",
   "允许 AI 打开 MBTI 测试",
   "允许本地问候、情绪建议与游戏选择对话",
-  "心情、专注、喝水、服药等已有健康统计",
-  "备忘、待办、闹钟、倒数日（仅本地读取）"
+  "喝水杯数、最近心情与时间，以及健康统计",
+  "备忘、待办、闹钟、倒数日（仅本地读取）",
+  "删除指定备忘/待办/闹钟/倒数日，需允许读取",
+  "删除指定心情/喝水/服药打卡，需允许健康读取"
 };
 
 static void back_to_permissions(lv_event_t *event)
@@ -44,7 +46,11 @@ static void open_permission_detail(lv_event_t *event)
   lv_label_set_text(s_detail_name, dm_ai_permission_name(p));
   lv_label_set_text(s_detail_state, !dm_ai_permission_enabled(p) ? "当前开关：已关闭" :
                     p != DM_AI_LOCAL && !dm_ai_permission_enabled(DM_AI_LOCAL)
-                      ? "开关已开启，但 AI 本地操作总开关关闭" : "当前开关：已开启");
+                      ? "开关已开启，但 AI 本地操作总开关关闭" :
+                    p == DM_AI_DELETE_LOCAL_DATA && !dm_ai_permission_allowed(DM_AI_READ_LOCAL_DATA)
+                      ? "开关已开启，但本地生活数据读取已关闭" :
+                    p == DM_AI_DELETE_HEALTH && !dm_ai_permission_allowed(DM_AI_READ_HEALTH)
+                      ? "开关已开启，但健康记录读取已关闭" : "当前开关：已开启");
   lv_label_set_text(s_detail_body, dm_ai_permission_explanation(p));
   lv_obj_scroll_to_y(s_detail_scroll, 0, LV_ANIM_OFF);
   dm_show(PAGE_PERMISSION_DETAIL);

@@ -33,6 +33,7 @@ if(CONFIG_DESKMATE_APP)
       dm_ai_log.c
       dm_ui_ai_log.c
       dm_ai_local_read.c
+      dm_ai_data.c
       dm_assistant.c
       dm_ui_meeting.c
     INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR})

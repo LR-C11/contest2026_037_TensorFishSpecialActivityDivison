@@ -32,6 +32,8 @@ static volatile int s_mic_err;
 static int s_out_ready; /* 1=text 2=microphone error */
 static bool s_out_local;
 static bool s_last_ans_local;
+static bool s_out_health;
+static bool s_last_ans_health;
 
 static char s_pending[CHAT_LINE_MAX];
 static char s_last_ans[CHAT_LINE_MAX];
@@ -107,6 +109,7 @@ static void *voice_worker(void *arg)
 
   (void)arg;
   s_out_local = false;
+  s_out_health = false;
 
   if (s_job == 1)
     {
@@ -131,6 +134,7 @@ static void *voice_worker(void *arg)
       if (voice_rc >= 0)
         {
           s_out_local = voice_rc == 3;
+          s_out_health = dm_voice_health_reply() != 0;
           snprintf(s_out_ans, sizeof(s_out_ans), "%s", reply);
           snprintf(s_out_sub, sizeof(s_out_sub), "%s",
                    voice_rc == 3
@@ -198,6 +202,7 @@ static void *voice_worker(void *arg)
       const char *r = dm_chat_ai_ask(s_pending);
       snprintf(s_out_ans, sizeof(s_out_ans), "%s", r ? r : "……");
       s_out_local = dm_chat_ai_local_reply() != 0;
+      s_out_health = dm_chat_ai_health_reply() != 0;
       if (s_out_local)
         {
           snprintf(s_out_sub, sizeof(s_out_sub), "%s",
@@ -447,6 +452,12 @@ void dm_create_chat(void)
 
 void dm_chat_tick(void)
 {
+  if (s_last_ans_health && !dm_ai_permission_allowed(DM_AI_READ_HEALTH))
+    {
+      set_ans(dm_t("读取健康记录权限已关闭", "Health record access is disabled"));
+      set_sub(dm_t("健康结果已从聊天页隐藏", "Previous health result hidden"));
+      s_last_ans_health = false;
+    }
   if (s_last_ans_local && !dm_ai_permission_allowed(DM_AI_READ_LOCAL_DATA))
     {
       set_ans(dm_t("本地生活数据读取权限已关闭", "Local data access is disabled"));
@@ -462,7 +473,13 @@ void dm_chat_tick(void)
           snprintf(s_out_ans, sizeof(s_out_ans), "%s", "本地生活数据读取权限已关闭，内容不会显示。");
           snprintf(s_out_sub, sizeof(s_out_sub), "%s", "请到权限管理检查读取开关");
         }
+      if (s_out_health && !dm_ai_permission_allowed(DM_AI_READ_HEALTH))
+        {
+          snprintf(s_out_ans, sizeof(s_out_ans), "%s", "读取健康记录权限已关闭，已有健康数据不会显示。");
+          snprintf(s_out_sub, sizeof(s_out_sub), "%s", "请到权限管理检查读取开关");
+        }
       s_last_ans_local = s_out_local;
+      s_last_ans_health = s_out_health;
       if (s_out_ans[0])
         {
           set_ans(s_out_ans);
