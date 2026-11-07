@@ -8,11 +8,12 @@
 #include <nuttx/config.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 #include <lvgl/lvgl.h>
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.19.0"
+#define DM_VER "0.19.1"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -344,7 +345,7 @@ int dm_wifi_connected(void);
 int dm_wifi_wait_time_sync(int timeout_sec);
 int dm_wifi_enabled(void);
 int dm_wifi_clock_valid(void);
-void dm_wifi_manual_time_mark(void);
+int dm_wifi_set_manual_time(time_t epoch);
 void dm_wifi_manual_time_restore(void);
 int dm_wifi_set_enabled(int on);
 void dm_wifi_poll(void);

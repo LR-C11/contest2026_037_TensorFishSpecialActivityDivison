@@ -1,5 +1,6 @@
 """Host regression tests. Run with Python 3 and GCC on Linux/WSL."""
 import pathlib
+import os
 import re
 import subprocess
 import tempfile
@@ -577,13 +578,164 @@ assert(wifi_is_link_up()==0);return 0;}
 ''')
 
     def test_seed_clock_requires_manual_confirmation_or_ntp(self):
+        text = source("dm_wifi.c")
         self.run_c(r'''
-static int s_clock_seed_only=1,samples;
+static int s_clock_seed_only=1,s_manual_time_set,samples,status_calls;
 static pthread_mutex_t s_ntp_lock=PTHREAD_MUTEX_INITIALIZER;
-static int wifi_ntp_has_samples(void){return samples;}
-''' + function(source("dm_wifi.c"), "dm_wifi_clock_valid") + r'''
+static int wifi_ntp_has_samples(void){status_calls++;return samples;}
+''' + function(text, "wifi_clock_in_range") + "\n" +
+                   function(text, "wifi_clock_synced") + "\n" +
+                   function(text, "dm_wifi_clock_valid") + r'''
 int main(void){assert(!dm_wifi_clock_valid());samples=1;
-assert(dm_wifi_clock_valid());assert(!s_clock_seed_only);return 0;}
+assert(dm_wifi_clock_valid());assert(!s_clock_seed_only);
+samples=0;status_calls=0;s_manual_time_set=1;
+assert(dm_wifi_clock_valid());assert(status_calls==0);
+assert(wifi_clock_synced());assert(status_calls==0);
+assert(!wifi_clock_in_range(0));return 0;}
+''')
+
+    def test_manual_time_is_verified_and_readable_by_voice_thread(self):
+        text = source("dm_wifi.c")
+        self.run_c(r'''
+#include <sys/time.h>
+#define DM_WIFI_MANUAL_TIME_PATH "manual-time.txt"
+static int s_clock_seed_only=1,s_manual_time_set,samples,status_calls;
+static int set_rc,readback_bad;
+static time_t fake_now=1546300800;
+static uint64_t s_ntp_retry_after_ms;
+static pthread_mutex_t s_ntp_lock=PTHREAD_MUTEX_INITIALIZER;
+#define DM_WIFI_NTP_RETRY_SEC 120
+struct ntpc_status_s{unsigned nsamples;};
+static int ntpc_status(struct ntpc_status_s *s){(void)s;assert(0);return 0;}
+static int dm_wifi_connected(void){return 1;}
+static void wifi_restart_ntp_after_link(void){assert(0);}
+static int wifi_ntp_has_samples(void){status_calls++;return samples;}
+static time_t fake_time(time_t *out){if(out)*out=fake_now;return fake_now;}
+static int fake_settimeofday(const struct timeval *tv,const void *tz)
+{(void)tz;if(set_rc){errno=EPERM;return -1;}
+ fake_now=tv->tv_sec+(readback_bad?60:0);return 0;}
+#define time fake_time
+#define settimeofday fake_settimeofday
+''' + function(text, "wifi_clock_in_range") + "\n" +
+                   function(text, "wifi_clock_synced") + "\n" +
+                   function(text, "dm_wifi_set_manual_time") + "\n" +
+                   function(text, "dm_wifi_manual_time_restore") + "\n" +
+                   function(text, "dm_wifi_wait_time_sync") + r'''
+static void *voice_worker(void *unused)
+{(void)unused;assert(dm_wifi_wait_time_sync(40)==0);return NULL;}
+int main(void){pthread_t worker;const time_t epoch=1794056400;
+assert(dm_wifi_set_manual_time(0)==-EINVAL);assert(!s_manual_time_set);
+set_rc=1;assert(dm_wifi_set_manual_time(epoch)==-EPERM);
+assert(!s_manual_time_set);
+set_rc=0;readback_bad=1;assert(dm_wifi_set_manual_time(epoch)==-EIO);
+assert(!s_manual_time_set);
+readback_bad=0;assert(dm_wifi_set_manual_time(epoch)==0);
+assert(s_manual_time_set && !s_clock_seed_only);
+assert(!pthread_create(&worker,NULL,voice_worker,NULL));
+pthread_join(worker,NULL);assert(status_calls==0);
+/* Simulate a reboot without an RTC: the saved epoch is not the new time. */
+fake_now=1546300800;s_manual_time_set=0;s_clock_seed_only=0;
+dm_wifi_manual_time_restore();assert(fake_now==epoch);
+assert(s_clock_seed_only && !s_manual_time_set && !wifi_clock_synced());
+assert(dm_wifi_set_manual_time(epoch)==0);assert(wifi_clock_synced());
+/* A missing /data equivalent cannot undo a successfully applied clock. */
+assert(remove("manual-time.txt")==0);
+assert(mkdir("manual-time.txt",0700)==0);
+assert(dm_wifi_set_manual_time(epoch)==0);assert(wifi_clock_synced());
+return 0;}
+'''.replace('int main(void)', '#include <sys/stat.h>\nint main(void)'))
+
+    def test_time_apply_ui_uses_verified_backend(self):
+        self.run_c(r'''
+typedef void lv_event_t;
+static int s_time_value[5]={2026,11,7,21,0},calls,rc,paint_calls;
+static void *s_time_hint_l=(void *)1;
+static char hint[256];
+static int time_days_in_month(int y,int m){(void)y;(void)m;return 30;}
+static const char *dm_t(const char *zh,const char *en){(void)en;return zh;}
+static void lv_label_set_text(void *l,const char *s)
+{(void)l;snprintf(hint,sizeof(hint),"%s",s);}
+static int dm_wifi_set_manual_time(time_t epoch){assert(epoch>0);calls++;return rc;}
+static void time_refresh_labels(void){paint_calls++;}
+''' + function(source("dm_ui_wifi.c"), "time_apply_cb") + r'''
+int main(void){time_apply_cb(NULL);assert(calls==1 && paint_calls==1);
+assert(strstr(hint,"本次开机已校准"));rc=-EPERM;time_apply_cb(NULL);
+assert(calls==2 && paint_calls==1 && strstr(hint,"时间未生效"));
+s_time_value[1]=13;time_apply_cb(NULL);assert(calls==2);return 0;}
+''')
+
+    def test_ntp_refresh_does_not_lock_out_manual_time_or_repeat_early(self):
+        text = source("dm_wifi.c")
+        self.run_c(r'''
+#define DM_WIFI_NTP_SERVERS "test.invalid"
+#define DM_WIFI_NTP_RETRY_SEC 120
+static pthread_mutex_t s_ntp_lock=PTHREAD_MUTEX_INITIALIZER;
+static uint64_t s_ntp_retry_after_ms,now_ms=1000;
+static int s_ntp_refresh_running,s_ntp_servers_selected;
+static int samples,stop_calls,start_calls,stop_rc;
+static int wifi_ntp_has_samples(void){return samples;}
+static uint64_t wifi_monotonic_ms(void){return now_ms;}
+static int ntpc_stop(void){stop_calls++;
+ assert(pthread_mutex_trylock(&s_ntp_lock)==0);
+ pthread_mutex_unlock(&s_ntp_lock);return stop_rc;}
+static int ntpc_start_with_list(const char *s){(void)s;start_calls++;
+ assert(pthread_mutex_trylock(&s_ntp_lock)==0);
+ pthread_mutex_unlock(&s_ntp_lock);return 435;}
+''' + function(text, "wifi_restart_ntp_after_link") + r'''
+int main(void){wifi_restart_ntp_after_link();assert(stop_calls==1 && start_calls==1);
+now_ms+=30000;wifi_restart_ntp_after_link();assert(stop_calls==1);
+now_ms=121000;s_ntp_refresh_running=1;wifi_restart_ntp_after_link();
+assert(stop_calls==1);s_ntp_refresh_running=0;stop_rc=-EIO;
+wifi_restart_ntp_after_link();assert(stop_calls==1 && start_calls==2);
+/* Initial configuration failure must not start another daemon. */
+now_ms+=120000;s_ntp_servers_selected=0;
+wifi_restart_ntp_after_link();assert(stop_calls==2 && start_calls==2);
+now_ms+=120000;samples=1;wifi_restart_ntp_after_link();assert(stop_calls==2);
+return 0;}
+''')
+
+    def test_time_wait_accepts_manual_calibration_at_deadline(self):
+        text = source("dm_wifi.c")
+        self.run_c(r'''
+#define DM_WIFI_NTP_RETRY_SEC 120
+static int checks,ready_at,connected=1;
+static int s_manual_time_set,s_clock_seed_only;
+static pthread_mutex_t s_ntp_lock=PTHREAD_MUTEX_INITIALIZER;
+struct ntpc_status_s{unsigned nsamples;};
+static int wifi_clock_synced(void){return ++checks>=ready_at;}
+static int dm_wifi_connected(void){return connected;}
+static void wifi_restart_ntp_after_link(void){}
+static int ntpc_status(struct ntpc_status_s *s){s->nsamples=0;return 0;}
+''' + function(text, "dm_wifi_wait_time_sync") + r'''
+int main(void){ready_at=2;assert(dm_wifi_wait_time_sync(0)==0);
+checks=0;ready_at=99;assert(dm_wifi_wait_time_sync(0)==-ETIMEDOUT);
+checks=0;connected=0;assert(dm_wifi_wait_time_sync(0)==-ENETDOWN);
+return 0;}
+''')
+
+    def test_sdk_ntp_samples_do_not_require_dns_ping(self):
+        sdk = pathlib.Path(os.environ.get("FLOWDESK_SDK", "/home/lrc/vela"))
+        path = sdk / "apps/netutils/ntpclient/ntpclient.c"
+        if not path.is_file():
+            self.skipTest("Set FLOWDESK_SDK to test the actual patched SDK")
+        text = path.read_text(encoding="utf-8")
+        start = text.index("      nsamples = 0;", text.index("static int ntpc_daemon("))
+        end = text.index("      /* Analyse samples. */", start)
+        self.run_c(r'''
+#define CONFIG_NETUTILS_NTPCLIENT_NUM_SAMPLES 5
+#define NTP_STOP_REQUESTED 9
+static struct {int state;} g_ntpc_daemon;
+static int calls,failures;
+static int ntpc_get_ntp_sample(void *s,void *samples,int n)
+{(void)s;(void)samples;(void)n;calls++;errno=ETIMEDOUT;
+return calls<=failures?-1:0;}
+static int collect(void){int nsamples,ret,errval=0,i;void *srvs=NULL,*samples=NULL;
+''' + text[start:end] + r'''
+(void)errval;return nsamples;}
+int main(void){assert(collect()==5 && calls==5);
+calls=0;failures=2;assert(collect()==3 && calls==5);
+calls=0;g_ntpc_daemon.state=NTP_STOP_REQUESTED;
+assert(collect()==0 && calls==0);return 0;}
 ''')
 
     def test_long_voice_note_is_rejected_without_truncation(self):

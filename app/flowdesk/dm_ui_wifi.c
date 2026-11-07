@@ -845,8 +845,8 @@ static void time_apply_cb(lv_event_t *e)
 {
   struct tm requested;
   struct tm verify;
-  struct timeval tv;
   time_t epoch;
+  int rc;
 
   (void)e;
   if (s_time_value[0] < 2024 || s_time_value[0] > 2099 ||
@@ -888,26 +888,24 @@ static void time_apply_cb(lv_event_t *e)
       return;
     }
 
-  tv.tv_sec = epoch;
-  tv.tv_usec = 0;
-  if (settimeofday(&tv, NULL) != 0)
+  rc = dm_wifi_set_manual_time(epoch);
+  if (rc != 0)
     {
       if (s_time_hint_l)
         {
           lv_label_set_text(s_time_hint_l,
-                            dm_t("设置失败，请确认系统允许改时钟",
-                                 "Set failed; clock change may be restricted"));
+                            dm_t("时间未生效，请查看串口校时日志",
+                                 "Clock not applied; check serial log"));
         }
       return;
     }
 
-  dm_wifi_manual_time_mark();
   time_refresh_labels();
   if (s_time_hint_l)
     {
       lv_label_set_text(s_time_hint_l,
-                        dm_t("已设置；网络 NTP 同步后会自动校正",
-                             "Set; NTP will correct it when available"));
+                        dm_t("本次开机已校准，可使用语音聊天",
+                             "Clock ready for voice this boot"));
     }
 }
 

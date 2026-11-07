@@ -63,7 +63,7 @@
 #define DM_WIFI_CONN_RETRY_SEC 5
 #define DM_WIFI_NTP_SERVERS \
   "ntp.aliyun.com;time2.cloud.tencent.com;time3.cloud.tencent.com"
-#define DM_WIFI_NTP_RETRY_SEC 30
+#define DM_WIFI_NTP_RETRY_SEC 120
 #define DM_WIFI_MANUAL_TIME_PATH "/data/deskmate_manual_time.txt"
 
 /* Fallback AP when no saved credentials exist.
@@ -83,6 +83,8 @@ static volatile int s_reconnect_running;
 static volatile int s_auto_thread_active;
 static uint64_t s_reconnect_retry_after_ms;
 static uint64_t s_ntp_retry_after_ms;
+static int s_ntp_refresh_running;
+static int s_ntp_servers_selected;
 static volatile int s_manual_time_set;
 static int s_clock_seed_only;
 static pthread_mutex_t s_ntp_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -267,54 +269,91 @@ static int wifi_ntp_has_samples(void)
   return ntpc_status(&status) == 0 && status.nsamples > 0;
 }
 
-int dm_wifi_clock_valid(void)
+static int wifi_clock_in_range(time_t now)
 {
-  time_t now = time(NULL);
-  struct tm current;
-  int valid;
-  int samples = wifi_ntp_has_samples();
-  pthread_mutex_lock(&s_ntp_lock);
-  if (samples) s_clock_seed_only = 0;
-  valid = !s_clock_seed_only;
-  pthread_mutex_unlock(&s_ntp_lock);
-  return valid && localtime_r(&now, &current) &&
-         current.tm_year + 1900 >= 2024;
+  struct tm utc;
+
+  return now > 0 && gmtime_r(&now, &utc) != NULL &&
+         utc.tm_year + 1900 >= 2024 && utc.tm_year + 1900 <= 2099;
 }
 
 static int wifi_clock_synced(void)
 {
-  struct tm utc;
-  time_t now = time(NULL);
+  int manual;
 
-  if (now <= 0 || gmtime_r(&now, &utc) == NULL || utc.tm_year + 1900 < 2024)
+  if (!wifi_clock_in_range(time(NULL)))
     {
       return 0;
     }
 
-  /* A saved/manual clock is usable for TLS while NTP is being retried; an
-   * actual NTP sample remains the authoritative source when available. */
-  return wifi_ntp_has_samples() || s_manual_time_set;
+  /* Manual confirmation must not wait behind ntpc_status(): the SDK holds
+   * its own NTP lock during daemon stop/start. A restored file is only a
+   * clock seed, never evidence of the current time after a power-off. */
+  pthread_mutex_lock(&s_ntp_lock);
+  manual = s_manual_time_set;
+  pthread_mutex_unlock(&s_ntp_lock);
+  if (manual)
+    {
+      return 1;
+    }
+  if (wifi_ntp_has_samples())
+    {
+      pthread_mutex_lock(&s_ntp_lock);
+      s_clock_seed_only = 0;
+      pthread_mutex_unlock(&s_ntp_lock);
+      return 1;
+    }
+  return 0;
 }
 
-void dm_wifi_manual_time_mark(void)
+int dm_wifi_clock_valid(void)
+{
+  /* Reminders and HTTPS must agree about whether this clock is usable. */
+  return wifi_clock_synced();
+}
+
+int dm_wifi_set_manual_time(time_t epoch)
 {
   FILE *f;
-  time_t now = time(NULL);
+  time_t actual;
+  struct timeval tv;
+  int saved = 0;
+
+  if (!wifi_clock_in_range(epoch))
+    {
+      return -EINVAL;
+    }
+  tv.tv_sec = epoch;
+  tv.tv_usec = 0;
+  if (settimeofday(&tv, NULL) != 0)
+    {
+      int rc = errno ? -errno : -EIO;
+      syslog(LOG_ERR, "[deskmate-wifi] manual clock set failed rc=%d\n", rc);
+      return rc;
+    }
+  actual = time(NULL);
+  if (actual < epoch || actual - epoch > 2)
+    {
+      syslog(LOG_ERR, "[deskmate-wifi] manual clock readback failed\n");
+      return -EIO;
+    }
 
   pthread_mutex_lock(&s_ntp_lock);
   s_manual_time_set = 1;
   s_clock_seed_only = 0;
-  s_ntp_retry_after_ms = 0;
   pthread_mutex_unlock(&s_ntp_lock);
 
   f = fopen(DM_WIFI_MANUAL_TIME_PATH, "w");
   if (f)
     {
-      fprintf(f, "%lld\n", (long long)now);
-      fclose(f);
+      int wrote = fprintf(f, "%lld\n", (long long)actual) > 0;
+      int closed = fclose(f) == 0;
+      saved = wrote && closed;
     }
   syslog(LOG_INFO,
-         "[deskmate-wifi] manual system time set; saved local clock seed\n");
+         "[deskmate-wifi] manual clock accepted epoch=%lld seed_saved=%d; HTTPS clock ready\n",
+         (long long)actual, saved);
+  return 0;
 }
 
 void dm_wifi_manual_time_restore(void)
@@ -371,6 +410,7 @@ static void wifi_restart_ntp_after_link(void)
 {
   int stop_rc;
   int start_rc;
+  int select_servers;
   uint64_t now_ms;
 
   if (wifi_ntp_has_samples())
@@ -380,22 +420,37 @@ static void wifi_restart_ntp_after_link(void)
 
   pthread_mutex_lock(&s_ntp_lock);
   now_ms = wifi_monotonic_ms();
-  if (s_ntp_retry_after_ms != 0 && now_ms < s_ntp_retry_after_ms)
+  if (s_ntp_refresh_running ||
+      (s_ntp_retry_after_ms != 0 && now_ms < s_ntp_retry_after_ms))
     {
       pthread_mutex_unlock(&s_ntp_lock);
       return;
     }
 
-  /* The stock pool may be unreachable from some WLANs. Refresh only from an
-   * app worker and provide several DNS-resolved public NTP endpoints. */
-  stop_rc = ntpc_stop();
-  start_rc = ntpc_start_with_list(DM_WIFI_NTP_SERVERS);
-  s_ntp_retry_after_ms = now_ms +
+  s_ntp_refresh_running = 1;
+  select_servers = !s_ntp_servers_selected;
+  pthread_mutex_unlock(&s_ntp_lock);
+
+  /* Do not hold the clock-state mutex while waiting for the SDK daemon.
+   * Manual calibration must remain usable even if NTP DNS is timing out.
+   * Replace the stock server list once. Subsequent starts leave a running
+   * daemon alone; ntpc_start_with_list() only creates one if it has exited. */
+  stop_rc = select_servers ? ntpc_stop() : 0;
+  start_rc = stop_rc < 0 ? stop_rc :
+             ntpc_start_with_list(DM_WIFI_NTP_SERVERS);
+
+  pthread_mutex_lock(&s_ntp_lock);
+  s_ntp_refresh_running = 0;
+  if (start_rc >= 0)
+    {
+      s_ntp_servers_selected = 1;
+    }
+  s_ntp_retry_after_ms = wifi_monotonic_ms() +
       (uint64_t)DM_WIFI_NTP_RETRY_SEC * 1000;
+  pthread_mutex_unlock(&s_ntp_lock);
   syslog(start_rc < 0 ? LOG_WARNING : LOG_INFO,
          "[deskmate-wifi] NTP refresh stop=%d start=%d\n",
          stop_rc, start_rc);
-  pthread_mutex_unlock(&s_ntp_lock);
 }
 
 int dm_wifi_wait_time_sync(int timeout_sec)
@@ -405,6 +460,8 @@ int dm_wifi_wait_time_sync(int timeout_sec)
   time_t now;
   int year = 0;
   int status_rc;
+  int manual;
+  int seed;
   int i;
 
   if (timeout_sec < 0)
@@ -436,6 +493,15 @@ int dm_wifi_wait_time_sync(int timeout_sec)
         }
     }
 
+  /* Catch a manual calibration arriving at the end of the wait. */
+  if (wifi_clock_synced())
+    {
+      return 0;
+    }
+  pthread_mutex_lock(&s_ntp_lock);
+  manual = s_manual_time_set;
+  seed = s_clock_seed_only;
+  pthread_mutex_unlock(&s_ntp_lock);
   memset(&status, 0, sizeof(status));
   status_rc = ntpc_status(&status);
   now = time(NULL);
@@ -444,8 +510,8 @@ int dm_wifi_wait_time_sync(int timeout_sec)
       year = utc.tm_year + 1900;
     }
   syslog(LOG_WARNING,
-         "[deskmate-wifi] NTP not ready; status=%d samples=%u year=%d; HTTPS deferred\n",
-         status_rc, status.nsamples, year);
+         "[deskmate-wifi] clock not ready; status=%d samples=%u year=%d manual=%d seed_only=%d; HTTPS deferred\n",
+         status_rc, status.nsamples, year, manual, seed);
   return -ETIMEDOUT;
 }
 
