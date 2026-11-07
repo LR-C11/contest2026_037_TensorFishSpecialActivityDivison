@@ -20,7 +20,8 @@ dm_ai_permission_t dm_ai_data_delete_permission(dm_ai_data_kind_t kind)
 int dm_ai_data_delete_allowed(dm_ai_data_kind_t kind)
 {
   return dm_ai_permission_allowed(dm_ai_data_delete_permission(kind)) &&
-         dm_ai_permission_allowed(dm_ai_data_read_permission(kind));
+         dm_ai_permission_allowed(dm_ai_data_read_permission(kind)) &&
+         dm_ai_permission_allowed(DM_AI_OPEN_APPS);
 }
 
 int dm_ai_data_match(const dm_ai_delete_request_t *request, const char *title,

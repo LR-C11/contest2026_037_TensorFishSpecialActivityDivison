@@ -29,8 +29,8 @@ static const char *const s_details[DM_AI_PERMISSION_COUNT] = {
   "允许本地问候、情绪建议与游戏选择对话",
   "喝水杯数、最近心情与时间，以及健康统计",
   "备忘、待办、闹钟、倒数日（仅本地读取）",
-  "删除指定备忘/待办/闹钟/倒数日，需允许读取",
-  "删除指定心情/喝水/服药打卡，需允许健康读取"
+  "删除后打开对应页，需允许生活数据读取和跳页",
+  "删除后打开对应页，需允许健康读取和跳页"
 };
 
 static void back_to_permissions(lv_event_t *event)
@@ -50,7 +50,10 @@ static void open_permission_detail(lv_event_t *event)
                     p == DM_AI_DELETE_LOCAL_DATA && !dm_ai_permission_allowed(DM_AI_READ_LOCAL_DATA)
                       ? "开关已开启，但本地生活数据读取已关闭" :
                     p == DM_AI_DELETE_HEALTH && !dm_ai_permission_allowed(DM_AI_READ_HEALTH)
-                      ? "开关已开启，但健康记录读取已关闭" : "当前开关：已开启");
+                      ? "开关已开启，但健康记录读取已关闭" :
+                    (p == DM_AI_DELETE_LOCAL_DATA || p == DM_AI_DELETE_HEALTH) &&
+                    !dm_ai_permission_allowed(DM_AI_OPEN_APPS)
+                      ? "开关已开启，但打开应用/页面权限关闭" : "当前开关：已开启");
   lv_label_set_text(s_detail_body, dm_ai_permission_explanation(p));
   lv_obj_scroll_to_y(s_detail_scroll, 0, LV_ANIM_OFF);
   dm_show(PAGE_PERMISSION_DETAIL);

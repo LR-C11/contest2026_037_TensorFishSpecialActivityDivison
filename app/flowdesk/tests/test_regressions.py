@@ -162,7 +162,7 @@ return 0;}
 static char s_notes[8][32];static int s_note_n=3,s_note_sel=2,saves,paints,save_rc;
 static bool read_allowed=true,delete_allowed=true,master=true;
 bool dm_ai_permission_allowed(dm_ai_permission_t p)
-{return master && (p==DM_AI_READ_LOCAL_DATA?read_allowed:p==DM_AI_DELETE_LOCAL_DATA?delete_allowed:false);}
+{return master && (p==DM_AI_READ_LOCAL_DATA?read_allowed:p==DM_AI_DELETE_LOCAL_DATA?delete_allowed:p==DM_AI_OPEN_APPS);}
 static int note_save(void){saves++;return save_rc;}
 static void note_paint(void){paints++;}
 ''' + function(source("dm_ui_note.c"),"dm_note_ai_delete") + r'''
@@ -183,10 +183,10 @@ assert(dm_note_ai_delete(&r)==-5 && s_note_n==2);return 0;}
     def test_delete_controller_checks_both_permissions_for_every_category(self):
         implementation = source("dm_ai_data.c").replace("#include <nuttx/config.h>", "")
         self.run_c('#define CONFIG_DESKMATE_APP 1\n' + implementation + r'''
-static bool master=true,read_allowed=true,delete_allowed=true;static int calls,kind_seen;
+static bool master=true,read_allowed=true,delete_allowed=true,open_allowed=true;static int calls,kind_seen;
 bool dm_ai_permission_allowed(dm_ai_permission_t p)
 {if(p<0||p>=DM_AI_PERMISSION_COUNT)return false;
-return master && ((p==DM_AI_READ_HEALTH||p==DM_AI_READ_LOCAL_DATA)?read_allowed:delete_allowed);}
+return master && (p==DM_AI_OPEN_APPS?open_allowed:(p==DM_AI_READ_HEALTH||p==DM_AI_READ_LOCAL_DATA)?read_allowed:delete_allowed);}
 static int operation(const dm_ai_delete_request_t*r){calls++;kind_seen=r->kind;return 0;}
 int dm_note_ai_delete(const dm_ai_delete_request_t*r){return operation(r);}
 int dm_reminder_ai_delete(const dm_ai_delete_request_t*r){return operation(r);}
@@ -202,7 +202,8 @@ memset(&r,0,sizeof(r));r.kind=k;r.selector=k==DM_AI_DATA_WATER?DM_AI_SELECT_TODA
 read_allowed=false;calls=0;assert(dm_ai_delete_data(&r)==-2 && !calls);
 read_allowed=true;delete_allowed=false;assert(dm_ai_delete_data(&r)==-2 && !calls);
 delete_allowed=true;master=false;assert(dm_ai_delete_data(&r)==-2 && !calls);
-master=true;assert(!dm_ai_delete_data(&r) && calls==1 && kind_seen==k);}
+master=true;open_allowed=false;assert(dm_ai_delete_data(&r)==-2 && !calls);
+open_allowed=true;assert(!dm_ai_delete_data(&r) && calls==1 && kind_seen==k);}
 r.kind=DM_AI_DATA_NOTE;r.selector=DM_AI_SELECT_INDEX;r.number=0;
 calls=0;assert(dm_ai_delete_data(&r)==-1 && !calls);
 r.selector=DM_AI_SELECT_TITLE;memset(r.title,'A',sizeof(r.title));
@@ -1183,7 +1184,8 @@ return 0;}
         text = source("dm_assistant.c")
         parser = self.parser()
         extra_pages = ["PAGE_ALARM", "PAGE_CHAT", "PAGE_HEALTH", "PAGE_MBTI",
-                       "PAGE_MED", "PAGE_MOOD_LOG", "PAGE_TODO"]
+                       "PAGE_MED", "PAGE_MOOD_LOG", "PAGE_TODO", "PAGE_NOTE",
+                       "PAGE_COUNTDOWN", "PAGE_WATER"]
         for page in extra_pages:
             if page not in parser.split("} dm_page_t;")[0]:
                 parser = parser.replace("} dm_page_t;", "," + page + "} dm_page_t;")
@@ -1193,12 +1195,12 @@ return 0;}
                      function(text, "intent_check_permission") + "\n" +
                      function(text, "run_intent"))
         self.run_c('#include "dm_ai_permissions.h"\n' + parser + r'''
-static bool allowed[DM_AI_PERMISSION_COUNT];static int effects;
+static bool allowed[DM_AI_PERMISSION_COUNT];static int effects,jumps;static dm_page_t last_page;
 static int todo_saves,note_saves,todo_delay,backend_rc;static char todo_title[256];
 bool dm_ai_permission_allowed(dm_ai_permission_t p)
 {return p>=0 && p<DM_AI_PERMISSION_COUNT && allowed[DM_AI_LOCAL] && allowed[p];}
 const char *dm_ai_permission_name(dm_ai_permission_t p){(void)p;return "permission";}
-static int dm_show(){effects++;return 0;}
+static int dm_show(dm_page_t page){effects++;jumps++;last_page=page;return 0;}
 static int dm_focus_start_seconds(){effects++;return 0;}
 int dm_ai_read_local(dm_ai_read_kind_t k,char *out,size_t cap)
 {(void)k;effects++;snprintf(out,cap,"LOCAL_RECORD_SECRET");return 0;}
@@ -1268,6 +1270,7 @@ assert(run_intent(&intent,reply,sizeof(reply))==0 && effects==0);
 assert(strstr(reply,"不支持"));
 allowed[DM_AI_LOCAL]=true;allowed[DM_AI_OPEN_APPS]=false;
 for(int kind=0;kind<DM_AI_DATA_COUNT;kind++){
+static const dm_page_t expected[]={PAGE_NOTE,PAGE_TODO,PAGE_ALARM,PAGE_COUNTDOWN,PAGE_HEALTH,PAGE_WATER,PAGE_MED};
 memset(&intent,0,sizeof(intent));intent.type=INTENT_DELETE_DATA;intent.deletion.kind=kind;
 dm_ai_permission_t read=dm_ai_data_read_permission(kind),del=dm_ai_data_delete_permission(kind);
 allowed[read]=false;effects=0;
@@ -1275,11 +1278,21 @@ assert(run_intent(&intent,reply,sizeof(reply))==-2 && !effects);
 record_intent_result(&intent,-2,reply);assert(audit_permission==read);
 allowed[read]=true;allowed[del]=false;
 assert(run_intent(&intent,reply,sizeof(reply))==-2 && !effects);allowed[del]=true;
-assert(!run_intent(&intent,reply,sizeof(reply)) && effects==1);
+assert(run_intent(&intent,reply,sizeof(reply))==-2 && !effects);
+record_intent_result(&intent,-2,reply);assert(audit_permission==DM_AI_OPEN_APPS);
+allowed[DM_AI_OPEN_APPS]=true;jumps=0;
+assert(!run_intent(&intent,reply,sizeof(reply)) && effects==2 && jumps==1 && last_page==expected[kind]);
+effects=0;jumps=0;
 backend_rc=-3;assert(run_intent(&intent,reply,sizeof(reply))==-3);
+assert(effects==1 && !jumps);
 record_intent_result(&intent,-3,reply);
 assert(audit_result==DM_AI_LOG_FAILED && audit_reason==DM_AI_LOG_REASON_SAVE);
 assert(audit_action==DM_AI_LOG_DELETE_NOTE+kind);backend_rc=0;
+const int failures[]={DM_AI_DATA_NOT_FOUND,DM_AI_DATA_AMBIGUOUS,DM_AI_DATA_BUSY,DM_AI_DATA_CLOCK};
+for(unsigned f=0;f<sizeof(failures)/sizeof(failures[0]);f++){
+backend_rc=failures[f];effects=0;jumps=0;
+assert(run_intent(&intent,reply,sizeof(reply))==backend_rc && effects==1 && !jumps);}
+backend_rc=0;allowed[DM_AI_OPEN_APPS]=false;
 }
 memset(&intent,0,sizeof(intent));intent.type=INTENT_READ_HEALTH;effects=0;
 allowed[DM_AI_READ_HEALTH]=false;

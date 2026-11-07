@@ -13,7 +13,7 @@
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.20.0"
+#define DM_VER "0.20.1"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF

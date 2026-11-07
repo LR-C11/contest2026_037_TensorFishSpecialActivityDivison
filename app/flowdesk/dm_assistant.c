@@ -2141,7 +2141,7 @@ static int intent_check_permission(assistant_intent_t *intent,
            !dm_ai_permission_allowed(dm_ai_data_read_permission(intent->deletion.kind)))
     denied = dm_ai_data_read_permission(intent->deletion.kind);
   else if (intent->type != INTENT_MOOD && intent->type != INTENT_READ_LOCAL &&
-           intent->type != INTENT_READ_HEALTH && intent->type != INTENT_DELETE_DATA &&
+           intent->type != INTENT_READ_HEALTH &&
            !dm_ai_permission_allowed(DM_AI_OPEN_APPS)) denied = DM_AI_OPEN_APPS;
   else return 1;
 
@@ -2197,13 +2197,20 @@ static int run_intent(assistant_intent_t *intent, char *reply, size_t cap)
               "已删除指定的一条今日心情记录。", "已删除指定范围的今日喝水记录。",
               "已清除指定药品今天的服药打卡，药品和用药计划已保留。"
             };
+            static const dm_page_t pages[DM_AI_DATA_COUNT] = {
+              PAGE_NOTE, PAGE_TODO, PAGE_ALARM, PAGE_COUNTDOWN,
+              PAGE_HEALTH, PAGE_WATER, PAGE_MED
+            };
+            dm_show(pages[intent->deletion.kind]);
             snprintf(reply, cap, "%s", replies[intent->deletion.kind]);
           }
         else if (rc == DM_AI_DATA_DENIED)
           {
             intent->denied_permission = !dm_ai_permission_allowed(DM_AI_LOCAL) ? DM_AI_LOCAL :
               !dm_ai_permission_allowed(dm_ai_data_read_permission(intent->deletion.kind))
-                ? dm_ai_data_read_permission(intent->deletion.kind) : dm_ai_data_delete_permission(intent->deletion.kind);
+                ? dm_ai_data_read_permission(intent->deletion.kind) :
+              !dm_ai_permission_allowed(dm_ai_data_delete_permission(intent->deletion.kind))
+                ? dm_ai_data_delete_permission(intent->deletion.kind) : DM_AI_OPEN_APPS;
             snprintf(reply, cap, "已关闭“%s”权限，未查找或删除记录。", dm_ai_permission_name(intent->denied_permission));
           }
         else if (rc == DM_AI_DATA_SAVE)
